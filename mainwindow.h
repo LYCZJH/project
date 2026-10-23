@@ -13,7 +13,7 @@ class QCheckBox;
 class QComboBox;
 class QProgressBar;
 
-// ---------------- 后台工作线程 ----------------
+//后台工作线程
 class Worker : public QObject {
     Q_OBJECT
 public:
@@ -44,14 +44,14 @@ private:
     std::atomic<bool> stop_{false};
 };
 
-// ---------------- 主窗口 ----------------
+//主窗口
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
-
 private slots:
+
     void pickSrc();
     void pickDst();
     void pasteFromClipboard();
