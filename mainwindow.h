@@ -36,12 +36,14 @@ signals:
     void logMsg(const QString&);
     void progress(int cur, int total);
     void finished(int found, int copied, QStringList missing, QStringList failed, bool aborted);
+    void askSignal(const QString& text, const QString& target, int* result);
 
 private:
     QStringList matchName(const QString& name,const QMap<QString, QStringList>& full,const QMap<QString, QStringList>& stem);
     QString uniquePath(const QString& dir, const QString& fname);
     Params p_;
     std::atomic<bool> stop_{false};
+    int askUser(const QString& text, const QString& target);
 };
 
 //界面

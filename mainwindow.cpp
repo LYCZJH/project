@@ -1,13 +1,6 @@
 #include "mainwindow.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QLineEdit>
-#include <QPushButton>
-#include <QTextEdit>
-#include <QLabel>
-#include <QCheckBox>
-#include <QComboBox>
-#include <QProgressBar>
 #include <QFileDialog>
 #include <QDirIterator>
 #include <QFileInfo>
@@ -20,7 +13,7 @@
 #include <QUrl>
 #include <QFont>
 #include <QApplication>
-
+#include <QStorageInfo>
 
 // Worker 线程实现
 void Worker::run()
@@ -28,8 +21,8 @@ void Worker::run()
     emit logMsg("开始扫描文件...");
     QMap<QString, QStringList> fullMap, stemMap;
     int count = 0;
-    auto flags = p_.recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
-    QDirIterator it(p_.src, QDir::Files | QDir::NoDotAndDotDot, flags);
+    auto flags = p_.subfolder ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
+    QDirIterator it(p_.src_file, QDir::Files | QDir::NoDotAndDotDot, flags);
     while (it.hasNext())
     {
         if (stop_.load())
@@ -45,7 +38,7 @@ void Worker::run()
     }
     emit logMsg(QString("扫描完成，共 %1 个文件").arg(count));
 
-    QDir().mkpath(p_.dst);
+    QDir().mkpath(p_.dst_file);
     QSet<QString> copied;
     int found = 0, copiedN = 0;
     QStringList missing, failed;
@@ -74,31 +67,48 @@ void Worker::run()
                 if (stop_.load())
                 break;
                 QString fname  = QFileInfo(path).fileName();
-                QString target = QDir(p_.dst).filePath(fname);
+                QString target = QDir(p_.dst_file).filePath(fname);
                 QString absSrc = QFileInfo(path).absoluteFilePath();
 
                 if (copied.contains(absSrc))
                 continue;
                 if (QFileInfo(target).absoluteFilePath() == absSrc)
-                    continue;
+                 continue;
 
                 if (QFile::exists(target))
                 {
-                    if (p_.conflict == 2)
+                    if (p_.combobox == 1)
+                    {
+                        QFile::remove(target);
+                    }
+                    else if (p_.combobox == 2)
                     {
                         emit logMsg(QString("  [跳过] %1").arg(fname));
                         continue;
                     }
-                    else if (p_.conflict == 1)
-                    {
-                        QFile::remove(target);
-                    }
                     else
                     {
-                        target = uniquePath(p_.dst, fname);
+                        target = uniquePath(p_.dst_file, fname);
                     }
                 }
+//判断磁盘空间
+                qint64 fileSize = QFileInfo(path).size();//获取准备复制的文件大小
+                QStorageInfo si(p_.dst_file);//获取目标文件夹所在的磁盘信息
 
+                if (si.isValid() && si.bytesAvailable() >= 0 && (quint64)si.bytesAvailable() < (quint64)fileSize)
+                {
+                    emit logMsg(QStringLiteral("  [告警] 磁盘空间不足: %1（需 %2 字节）").arg(target).arg(fileSize));
+                    int d = askUser(QStringLiteral("目标磁盘剩余空间不足（本文件需要 %1 字节）").arg(fileSize), target);
+                    if (d == 2 || stop_.load())
+                    {
+                        emit finished(found, copiedN, missing, failed, true);
+                        return;
+                    }
+                    si.refresh();//刷新磁盘
+                    if (d != 1 || si.bytesAvailable() < fileSize)
+                        continue;                          // 跳过该文件
+                }
+//复制文件
                 if (QFile::copy(path, target))
                 {
                     copied.insert(absSrc);
@@ -112,9 +122,19 @@ void Worker::run()
                 }
             }
         }
-        emit progress(i + 1, total);
+        emit progress(i + 1, total);//进度条
     }
     emit finished(found, copiedN, missing, failed, false);
+}
+
+int Worker::askUser(const QString& text, const QString& target)
+{
+    // 返回值0跳过 1重试 2中止
+    // 使用 BlockingQueuedConnection，信号发出后会阻塞在子线程
+    // 直到主线程弹框返回把结果写入 result
+    int result = 0;
+    emit askSignal(text, target, &result);
+    return result;
 }
 
 QStringList Worker::matchName(const QString& name, const QMap<QString, QStringList>& full,const QMap<QString, QStringList>& stem)
@@ -331,12 +351,12 @@ void MainWindow::start()
     }
 
     Worker::Params p;
-    p.src = src;
-    p.dst = dst;
+    p.src_file = src;
+    p.dst_file = dst;
     p.names = names;
-    p.recursive = recurseChk->isChecked();
+    p.subfolder = recurseChk->isChecked();
     p.fuzzy = fuzzyChk->isChecked();
-    p.conflict = conflictCombo->currentIndex();
+    p.combobox = conflictCombo->currentIndex();
     lastDst_ = dst;
 
     logEdit->clear();
@@ -357,6 +377,23 @@ void MainWindow::start()
         statusLabel->setText(QString("%1 / %2").arg(c).arg(t));
     });
     connect(worker_, &Worker::finished, this, &MainWindow::onFinished);
+
+// 跨线程询问：BlockingQueuedConnection 让子线程等待主线程结果
+    connect(worker_, &Worker::askSignal, this,[this](const QString& text, const QString& target, int* result)
+            {
+                QMessageBox box(QMessageBox::Warning, "磁盘空间不足",text + "\n\n文件: " + QFileInfo(target).fileName(),QMessageBox::NoButton, this);
+                QPushButton* btnRetry = box.addButton("重试",    QMessageBox::AcceptRole);
+                QPushButton* btnSkip  = box.addButton("跳过此文件", QMessageBox::RejectRole);
+                QPushButton* btnAbort = box.addButton("中止全部", QMessageBox::DestructiveRole);
+                box.setDefaultButton(btnRetry);
+                box.exec();
+
+                if (box.clickedButton() == btnRetry)*result = 1;
+                else if (box.clickedButton() == btnAbort)*result = 2;
+                else *result = 0;
+            },
+            Qt::BlockingQueuedConnection);
+
     thread_->start();
 }
 
@@ -402,38 +439,22 @@ QStringList MainWindow::parseNames(const QString& text)
     for (QString line : s.split('\n'))
     {
         line = line.trimmed();
-        while (!line.isEmpty() && (line.front() == '"' || line.front() == '\''))
-            line.remove(0, 1);
-        while (!line.isEmpty() && (line.back()  == '"' || line.back()  == '\''))
-            line.chop(1);
+        while (!line.isEmpty() && (line.front() == '"' || line.front() == '\'')) line.remove(0, 1);
+        while (!line.isEmpty() && (line.back()  == '"' || line.back()  == '\'')) line.chop(1);
         line = line.trimmed();
-        if (line.isEmpty())
-            continue;
+        if (line.isEmpty()) continue;
 
         int lastSep = -1;
         for (int i = 0; i < line.size(); ++i)
+        if (line[i] == '\\' || line[i] == '/') lastSep = i;
+        if (lastSep >= 0) line = line.mid(lastSep + 1).trimmed();
+        if (line.isEmpty()) continue;
+
+        QString key = line.toLower();
+        if (!seen.contains(key))
         {
-            if (line[i] == '\\' || line[i] == '/')
-            {
-               lastSep = i;
-            }
-
-
-            if (lastSep >= 0)
-            {
-               line = line.mid(lastSep + 1).trimmed();
-            }
-
-            if (line.isEmpty())
-                continue;
-
-            QString key = line.toLower();
-            if (!seen.contains(key))
-            {
-                seen.insert(key); out << line;
-            }
+            seen.insert(key); out << line;
         }
-
     }
     return out;
 }
