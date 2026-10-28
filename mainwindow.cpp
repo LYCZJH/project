@@ -14,36 +14,205 @@
 #include <QFont>
 #include <QApplication>
 #include <QStorageInfo>
+#include <QDateTime>
+#include <QEventLoop>
+#include <QTimer>
 
-// Worker 线程实现
+//源可读/目标可创建/探测文件
+bool Worker::preflight()
+{
+// 源文件夹
+    QFileInfo srcInfo(p_.src_file);
+    if (!srcInfo.isDir() || !srcInfo.isReadable())
+    {
+        emit logMsg(QStringLiteral(" [告警] 源文件夹不可读: %1").arg(p_.src_file));
+        int d = askUser(QStringLiteral("源文件夹不存在或无读权限"), p_.src_file);
+        if (d == Abort) return false;
+        srcInfo.refresh();
+        if (!srcInfo.isDir() || !srcInfo.isReadable()) return false;
+    }
+
+//目标文件夹：创建
+    QDir dstDir(p_.dst_file);
+    if (!dstDir.exists() && !QDir().mkpath(p_.dst_file))
+    {
+        emit logMsg(QStringLiteral(" [告警] 目标文件夹创建失败: %1").arg(p_.dst_file));
+        int d = askUser(QStringLiteral("目标文件夹创建失败（可能无写权限或路径非法）"), p_.dst_file);
+        if (d == Abort) return false;
+        dstDir = QDir(p_.dst_file);
+        if (!dstDir.exists()) return false;
+    }
+
+//目标文件夹：写权限探测
+    const QString probe = dstDir.filePath(QStringLiteral(".fc_probe_%1.tmp").arg(QDateTime::currentMSecsSinceEpoch()));
+    {
+        QFile f(probe);
+        if (!f.open(QIODevice::WriteOnly))
+        {
+            emit logMsg(QStringLiteral(" [告警] 目标目录写入探测失败"));
+            int d = askUser(QStringLiteral("目标目录无写权限（写入探测失败）"), p_.dst_file);
+            if (d == Abort) return false;
+            if (!f.open(QIODevice::WriteOnly)) return false;
+        }
+    }
+    QFile::remove(probe);
+    return true;
+}
+
+//扫描：手动栈式递归，支持符号链接环检测与逐目录权限隔离
+bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStringList> &stemMap, QStringList &quarantine)
+{
+    QSet<QString> visitedDirs;
+    QStringList stack;
+    stack << p_.src_file;
+    visitedDirs << QFileInfo(p_.src_file).canonicalFilePath();
+
+    int count = 0;
+    while (!stack.isEmpty())
+    {
+        if (stop_.load()) return false;
+        const QString dirPath = stack.takeLast();
+        QFileInfo di(dirPath);
+
+        if (!di.isReadable())
+        {
+            quarantine << QStringLiteral("隔离目录(无权限): %1").arg(dirPath);
+            emit logMsg(QStringLiteral(" [隔离] 目录无读权限，未扫描: %1").arg(dirPath));
+            continue;
+        }
+
+        const auto entries = QDir(dirPath).entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+
+        for (const QFileInfo &fi : entries)
+        {
+            if (stop_.load()) return false;
+
+            if (fi.isSymLink())
+            {
+                const QFileInfo target(fi.symLinkTarget());
+                if (!target.exists())
+                {
+                    quarantine << QStringLiteral("隔离链接(断链): %1").arg(fi.absoluteFilePath());
+                    continue;
+                }
+                if (target.isDir())
+                {
+                    if (!p_.subfolder) continue;
+                    const QString canon = target.canonicalFilePath();
+                    if (visitedDirs.contains(canon))
+                    {
+                        emit logMsg(QStringLiteral(" [告警] 符号链接循环: %1").arg(fi.absoluteFilePath()));
+                        int d = askUser(QStringLiteral("检测到符号链接循环"), fi.absoluteFilePath());
+                        if (d == Abort || stop_.load()) return false;
+                        continue;
+                    }
+                    visitedDirs.insert(canon);
+                    stack << fi.absoluteFilePath();
+                    continue;
+                }
+//链接到文件
+                if (!target.isReadable())
+                {
+                    quarantine << QStringLiteral("隔离文件(无权限): %1").arg(fi.absoluteFilePath());
+                    continue;
+                }
+                fullMap[fi.fileName().toLower()].append(fi.absoluteFilePath());
+                stemMap[fi.completeBaseName().toLower()].append(fi.absoluteFilePath());
+                ++count;
+                continue;
+            }
+
+            if (fi.isDir())
+            {
+                if (!p_.subfolder) continue;
+                if (!fi.isReadable())
+                {
+                    quarantine << QStringLiteral("隔离目录(无权限): %1").arg(fi.absoluteFilePath());
+                    continue;
+                }
+                stack << fi.absoluteFilePath();
+            }
+            else if (fi.isFile())
+            {
+                if (!fi.isReadable())
+                {
+                    quarantine << QStringLiteral("隔离文件(无权限): %1").arg(fi.absoluteFilePath());
+                    continue;
+                }
+                fullMap[fi.fileName().toLower()].append(fi.absoluteFilePath());
+                stemMap[fi.completeBaseName().toLower()].append(fi.absoluteFilePath());
+                ++count;
+            }
+        }
+    }
+    emit logMsg(QStringLiteral("扫描完成，共 %1 个文件").arg(count));
+    return true;
+}
+
+//非法文件名检查
+bool Worker::illegalName(const QString &n, QString *why) const
+{
+    static const QString bad = QStringLiteral("<>:\"/\\|?*");
+    for (QChar c : n)
+    {
+        if (c.unicode() < 32 || bad.contains(c))
+        {
+            if (why) *why = QStringLiteral("含非法字符 '%1'").arg(c);
+            return true;
+        }
+    }
+    if (n.endsWith(QLatin1Char('.')) || n.endsWith(QLatin1Char(' ')))
+    {
+        if (why) *why = QStringLiteral("Windows 文件名不能以点或空格结尾");
+        return true;
+    }
+    static const QSet<QString> reserved =
+        {
+        QStringLiteral("CON"), QStringLiteral("PRN"), QStringLiteral("AUX"), QStringLiteral("NUL"),
+        QStringLiteral("COM1"), QStringLiteral("COM2"), QStringLiteral("COM3"), QStringLiteral("COM4"),
+        QStringLiteral("COM5"), QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
+        QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"), QStringLiteral("LPT3"),
+        QStringLiteral("LPT4"), QStringLiteral("LPT5"), QStringLiteral("LPT6"), QStringLiteral("LPT7"),
+        QStringLiteral("LPT8"), QStringLiteral("LPT9")
+    };
+    const QString base = n.left(n.lastIndexOf(QLatin1Char('.'))).toUpper();
+    if (reserved.contains(base))
+    {
+        if (why) *why = QStringLiteral("Windows 保留设备名");
+        return true;
+    }
+    if (n.size() > 255)
+    {
+        if (why) *why = QStringLiteral("文件名超过 255 字符");
+        return true;
+    }
+    return false;
+}
+//Worker线程实现
 void Worker::run()
 {
-    emit logMsg("开始扫描文件...");
-    QMap<QString, QStringList> fullMap, stemMap;
-    int count = 0;
-    auto flags = p_.subfolder ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags;
-    QDirIterator it(p_.src_file, QDir::Files | QDir::NoDotAndDotDot, flags);
-    while (it.hasNext())
-    {
-        if (stop_.load())
-        {
-            emit finished(0, 0, QStringList(), QStringList(), true);
-            return;
-        }
-        QString path = it.next();
-        QFileInfo fi(path);
-        fullMap[fi.fileName().toLower()].append(path);
-        stemMap[fi.completeBaseName().toLower()].append(path);
-        ++count;
-    }
-    emit logMsg(QString("扫描完成，共 %1 个文件").arg(count));
-
-    QDir().mkpath(p_.dst_file);
+    emit logMsg("开始预检...");
+    QStringList quarantine, missing, failed, skipped;
     QSet<QString> copied;
     int found = 0, copiedN = 0;
-    QStringList missing, failed;
-    const int total = p_.names.size();
+//管道级预检
+    if (!preflight())
+    {
+        emit finished(found, copiedN, missing, failed, true);
+        return;
+    }
 
+//扫描
+    emit logMsg("开始扫描文件...");
+    QMap<QString, QStringList> fullmap, stemmap;
+    if (!scanPhase(fullmap, stemmap, quarantine))
+    {
+        emit finished(found, copiedN, missing, failed, true);
+        return;
+    }
+
+//匹配与复制
+    const int total = p_.names.size();
     for (int i = 0; i < total; ++i)
     {
         if (stop_.load())
@@ -51,46 +220,81 @@ void Worker::run()
             emit finished(found, copiedN, missing, failed, true);
             return;
         }
-        const QString& name = p_.names[i];
-        QStringList paths = matchName(name, fullMap, stemMap);
+        const QString &name = p_.names.at(i);
+        QString why;
 
+//拦截非法文件名
+        if (illegalName(name, &why))
+        {
+            skipped << QStringLiteral("[%1]：%2").arg(name, why);
+            emit logMsg(QStringLiteral("  [格式错误·已跳过] [%1]：%2").arg(name, why));
+            emit progress(i + 1, total);
+            continue;
+        }
+
+//匹配文件
+        const QStringList paths = matchName(name, fullmap, stemmap);
         if (paths.isEmpty())
         {
             missing << name;
-            emit logMsg(QString("  × 未找到: %1").arg(name));
+            emit logMsg(QStringLiteral("  × 未找到: %1").arg(name));
+            emit progress(i + 1, total);
+            continue;
         }
-        else
+
+        ++found;
+        for (const QString &path : std::as_const(paths))
         {
-            ++found;
-            for (const QString& path : std::as_const(paths))
+            if (stop_.load()) break;
+            QFileInfo fi(path);
+
+            if (!fi.exists() || !fi.isFile())
             {
-                if (stop_.load())
-                break;
-                QString fname  = QFileInfo(path).fileName();
-                QString target = QDir(p_.dst_file).filePath(fname);
-                QString absSrc = QFileInfo(path).absoluteFilePath();
-
-                if (copied.contains(absSrc))
-                continue;
-                if (QFileInfo(target).absoluteFilePath() == absSrc)
-                 continue;
-
-                if (QFile::exists(target))
+                emit logMsg(QStringLiteral("  [告警] 扫描后文件已移动或删除: %1").arg(path));
+                int d = askUser(QStringLiteral("文件在扫描后被移动/删除"), path);
+                if (d == Abort || stop_.load())
                 {
-                    if (p_.combobox == 1)
+                    emit finished(found, copiedN, missing, failed, true);
+                    return;
+                }
+                fi.refresh();
+                if (d != Retry || !fi.exists() || !fi.isFile()) continue;
+            }
+
+//路径拦截
+            const QString target = QDir(p_.dst_file).filePath(fi.fileName());
+            if (path.size() >= 260 || QDir::cleanPath(target).size() >= 260)
+            {
+                quarantine << QStringLiteral("路径超长: %1").arg(path);
+                emit logMsg(QStringLiteral("  [隔离] 路径超过 260 字符限制: %1").arg(path));
+                continue;
+            }
+
+            const QString absSrc = fi.absoluteFilePath();
+            if (copied.contains(absSrc)) continue;
+            if (QFileInfo(target).absoluteFilePath() == absSrc) continue;
+
+            QString realTarget = target;
+            if (QFile::exists(realTarget))
+            {
+                if (p_.combobox == 2)
+                {
+                    emit logMsg(QStringLiteral("  [跳过] %1").arg(fi.fileName()));
+                    continue;
+                }
+                else if (p_.combobox == 1)
+                {
+                    if (!QFile::remove(realTarget))
                     {
-                        QFile::remove(target);
-                    }
-                    else if (p_.combobox == 2)
-                    {
-                        emit logMsg(QString("  [跳过] %1").arg(fname));
+                        quarantine << QStringLiteral("目标被占用: %1").arg(realTarget);
                         continue;
                     }
-                    else
-                    {
-                        target = uniquePath(p_.dst_file, fname);
-                    }
                 }
+                else
+                {
+                    realTarget = uniquePath(p_.dst_file, fi.fileName());
+                }
+            }
 //判断磁盘空间
                 qint64 fileSize = QFileInfo(path).size();//获取准备复制的文件大小
                 QStorageInfo si(p_.dst_file);//获取目标文件夹所在的磁盘信息
@@ -120,11 +324,16 @@ void Worker::run()
                     failed << path;
                     emit logMsg(QString("  [失败] %1").arg(path));
                 }
-            }
         }
         emit progress(i + 1, total);//进度条
     }
+    if (!quarantine.isEmpty())
+    {
+        emit logMsg(QStringLiteral("共有 %1 个文件/目录被隔离忽略。").arg(quarantine.size()));
+    }
+
     emit finished(found, copiedN, missing, failed, false);
+
 }
 
 int Worker::askUser(const QString& text, const QString& target)
@@ -191,7 +400,7 @@ QString Worker::uniquePath(const QString& dir, const QString& fname)
 
 
 // MainWindow 实现
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),previewListWidget(new QListWidget(this))
 {
     QWidget *centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
@@ -216,6 +425,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     auto* pasteBtn = new QPushButton("从剪贴板粘贴");
     connect(pasteBtn, &QPushButton::clicked, this, &MainWindow::pasteFromClipboard);
     row2->addWidget(pasteBtn);
+
+    auto* saveListBtn = new QPushButton("保存列表");
+    connect(saveListBtn, &QPushButton::clicked, this, &MainWindow::saveList);
+    row2->addWidget(saveListBtn);
+    auto* loadListBtn = new QPushButton("加载列表");
+    connect(loadListBtn, &QPushButton::clicked, this, &MainWindow::loadList);
+    row2->addWidget(loadListBtn);
+
+
     auto* clearBtn = new QPushButton("清空");
     connect(clearBtn, &QPushButton::clicked, [this]
             { namesEdit->clear(); updateCount();});
@@ -230,6 +448,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     namesEdit->setFont(QFont("Consolas", 10));
     connect(namesEdit, &QTextEdit::textChanged, this, &MainWindow::updateCount);
     main->addWidget(namesEdit, 2);
+
+    // 预览区域容器
+    auto* rowPreview = new QHBoxLayout;
+    auto* previewBtn = new QPushButton("🔍 预览匹配结果");
+    connect(previewBtn, &QPushButton::clicked, this, &MainWindow::onPreviewClicked);
+    rowPreview->addWidget(previewBtn);
+    rowPreview->addStretch();
+    main->addLayout(rowPreview);
+
+    // 预览结果显示控件
+    previewListWidget = new QListWidget();
+    previewListWidget->setMaximumHeight(150); // 限制高度
+    previewListWidget->setVisible(false);     // 初始隐藏
+    main->addWidget(previewListWidget);
 
     //目标文件夹
     auto* row3 = new QHBoxLayout;
@@ -381,17 +613,17 @@ void MainWindow::start()
 // 跨线程询问：BlockingQueuedConnection 让子线程等待主线程结果
     connect(worker_, &Worker::askSignal, this,[this](const QString& text, const QString& target, int* result)
             {
-                QMessageBox box(QMessageBox::Warning, "磁盘空间不足",text + "\n\n文件: " + QFileInfo(target).fileName(),QMessageBox::NoButton, this);
+                QMessageBox box(QMessageBox::Warning, "处理异常",text + "\n\n文件: " + QFileInfo(target).fileName(),QMessageBox::NoButton, this);
                 QPushButton* btnRetry = box.addButton("重试",    QMessageBox::AcceptRole);
                 QPushButton* btnSkip  = box.addButton("跳过此文件", QMessageBox::RejectRole);
                 QPushButton* btnAbort = box.addButton("中止全部", QMessageBox::DestructiveRole);
                 box.setDefaultButton(btnRetry);
                 box.exec();
 
-                if (box.clickedButton() == btnRetry)*result = 1;
-                else if (box.clickedButton() == btnAbort)*result = 2;
-                else *result = 0;
-            },
+        if(box.clickedButton() == btnRetry)*result = Worker::Retry;
+        else if(box.clickedButton() == btnSkip)*result = Worker::Skip;
+        else*result = Worker::Abort;
+    },
             Qt::BlockingQueuedConnection);
 
     thread_->start();
@@ -457,4 +689,114 @@ QStringList MainWindow::parseNames(const QString& text)
         }
     }
     return out;
+}
+
+//保存列表
+void MainWindow::saveList()
+{
+    QString path = QFileDialog::getSaveFileName(this, "保存文件名列表", "", "文本文件 (*.txt);;所有文件 (*)");
+    if (!path.isEmpty())
+    {
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            file.write(namesEdit->toPlainText().toUtf8());
+            QMessageBox::information(this, "成功", "文件列表已保存。");
+        } else {
+            QMessageBox::warning(this, "错误", "无法写入文件。");
+        }
+    }
+}
+
+//加载列表
+void MainWindow::loadList()
+{
+    QString path = QFileDialog::getOpenFileName(this, "打开文件名列表", "", "文本文件 (*.txt);;所有文件 (*)");
+    if (!path.isEmpty())
+    {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            namesEdit->setPlainText(file.readAll());
+            updateCount(); // 刷新计数
+        }
+        else
+        {
+            QMessageBox::warning(this, "错误", "无法读取文件。");
+        }
+    }
+}
+
+//预览匹配结果点击事件
+void MainWindow::onPreviewClicked()
+{
+//清空旧数据
+    previewListWidget->clear();
+    previewListWidget->setVisible(false);
+
+    // 验证输入
+    QString src = srcEdit->text().trimmed();
+    if (!QDir(src).exists())
+    {
+        QMessageBox::warning(this, "提示", "源文件夹不存在");
+        return;
+    }
+    QStringList names = parseNames(namesEdit->toPlainText());
+    if (names.isEmpty())
+    {
+        QMessageBox::warning(this, "提示", "请先粘贴文件名");
+        return;
+    }
+
+    logEdit->append("正在预览匹配结果...");
+    startBtn->setEnabled(false);
+    stopBtn->setEnabled(false);
+
+//构建预览参数
+    Worker::Params p;
+    p.src_file = src;
+    p.names = names;
+    p.subfolder = recurseChk->isChecked();
+    p.fuzzy = fuzzyChk->isChecked();
+    p.combobox = conflictCombo->currentIndex();
+    p.previewMode = true;
+
+//使用事件循环等待预览完成
+    QEventLoop loop;
+    Worker *previewWorker = new Worker(p);
+    QThread *previewThread = new QThread;
+
+    previewWorker->moveToThread(previewThread);
+
+    connect(previewThread, &QThread::started, previewWorker, &Worker::run);
+
+// 连接信号：当收到预览结果时，弹出提示并恢复UI
+    connect(previewWorker, &Worker::previewFinished, this, [this](const QMap<QString, QStringList>& files)
+            {
+        QStringList matchedNames;
+        for (const QString& name : files.keys())
+        {
+            matchedNames << name;
+        }
+
+//延迟一点让日志先刷出来
+        QTimer::singleShot(100, [this, matchedNames]()
+        {
+            this->previewListWidget->setVisible(true);
+            this->previewListWidget->addItems(matchedNames);
+            QMessageBox::information(this, "预览完成", QString("找到 %1 个匹配的文件名。\n请查看下方列表。").arg(matchedNames.size()));
+            this->startBtn->setEnabled(true);
+        });
+    });
+
+//连接信号：当线程结束时结束事件循环
+    connect(previewWorker, &Worker::finished, &loop, &QEventLoop::quit);
+    connect(previewWorker, &Worker::logMsg, logEdit, &QTextEdit::append);
+
+    previewThread->start();
+    loop.exec(); //阻塞在这里，直到预览完成
+
+    previewThread->quit();
+    previewThread->wait();
+    delete previewWorker;
+    delete previewThread;
 }
