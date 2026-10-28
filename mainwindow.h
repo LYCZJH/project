@@ -14,6 +14,7 @@
 #include <QMap>
 #include <QStringList>
 #include <QListWidget>
+#include <QTextStream>
 
 //后台工作线程
 class Worker : public QObject {
@@ -30,6 +31,7 @@ public:
         int combobox = 0;//下拉框
 
         bool previewMode = false; //标记是否处于预览模式
+        bool moveMode = false; // true移动(复制后删除源)false复制
     };
 
     enum Decision { Retry = 0, Skip = 1, Abort = 2 };
@@ -83,6 +85,7 @@ private slots:
     void loadList();
     void saveList();
 
+     void saveReport();   // 保存日志+未找到/失败清单
 
 private:
     static QStringList parseNames(const QString& text);
@@ -99,6 +102,9 @@ private:
     QString  lastDst_;
 
     QListWidget *previewListWidget;
+
+    QComboBox* modeCombo = nullptr;//复制/移动模式
+    QStringList lastMissing_, lastFailed_; //上次运行的未找到/失败清单
 };
 
 #endif // MAINWINDOW_H
