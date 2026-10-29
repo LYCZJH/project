@@ -18,6 +18,62 @@
 #include <QEventLoop>
 #include <QTimer>
 #include <utility>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+
+//线程安全暂停和保存逻辑
+void Worker::checkPause()
+{
+    std::unique_lock<std::mutex> lock(pauseMutex_);
+    if (pauseFlag_ && !stop_.load())
+    {
+        pauseCount_++;
+        emit Paused(pauseCount_);
+        //阻塞等待，直到点击继续（pauseFlag变false）或点击停止（stop变true）
+        pauseCond_.wait(lock, [this]() { return !pauseFlag_ || stop_.load(); });
+        if (!stop_.load())
+        {
+            emit Continue();
+        }
+    }
+}
+
+void Worker::saveContinueRecord()
+{
+    if (p_.ContinueFilePath.isEmpty()) return;
+
+    QJsonObject root;
+    root["taskId"] = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+
+    QJsonArray srcArray;
+    for (const auto& src : p_.src_files) srcArray.append(src);
+    root["src_files"] = srcArray;
+
+    root["dst_file"] = p_.dst_file;
+
+    QJsonArray namesArray;
+    for (const auto& name : p_.names) namesArray.append(name);
+    root["names"] = namesArray;
+
+    root["subfolder"] = p_.subfolder;
+    root["fuzzy"] = p_.fuzzy;
+    root["combobox"] = p_.combobox;
+    root["moveMode"] = p_.moveMode;
+    root["hidden"] = p_.hidden;
+    root["system"] = p_.system;
+
+    QJsonArray processedArray;
+    for (const auto& file : p_.processedFiles) processedArray.append(file);
+    root["processedFiles"] = processedArray;
+
+    QFile file(p_.ContinueFilePath);
+    if (file.open(QIODevice::WriteOnly))
+    {
+        file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+        file.close();
+    }
+}
 
 //源可读/目标可创建/探测文件
 bool Worker::preflight()
@@ -91,6 +147,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
     int count = 0;
     while (!stack.isEmpty())
     {
+         checkPause();
         if (stop_.load()) return false;
         const QString dirPath = stack.takeLast();
         QFileInfo di(dirPath);
@@ -110,6 +167,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
 
         for (const QFileInfo &fi : entries)
         {
+             checkPause();
             if (stop_.load()) return false;
 
             if (fi.isSymLink())
@@ -285,6 +343,7 @@ void Worker::run()
     const int total = p_.names.size();
     for (int i = 0; i < total; ++i)
     {
+         checkPause();//处理每个文件名前响应暂停
         if (stop_.load())
         {
             emit finished(found, copiedN, missing, failed, true);
@@ -315,6 +374,7 @@ void Worker::run()
         ++found;
         for (const QString &path : std::as_const(paths))
         {
+            checkPause();
             if (stop_.load()) break;
             QFileInfo fi(path);
 
@@ -329,6 +389,13 @@ void Worker::run()
                 }
                 fi.refresh();
                 if (d != Retry || !fi.exists() || !fi.isFile()) continue;
+            }
+
+//跳过已经处理过的文件（断点继续跑）
+            if (p_.processedFiles.contains(fi.absoluteFilePath()))
+            {
+                emit logMsg(QStringLiteral("  [跳过已处理] %1").arg(path));
+                continue;
             }
 
 //路径拦截
@@ -388,6 +455,10 @@ void Worker::run()
                 {
                     copied.insert(absSrc);
                     ++copiedN;
+
+                    p_.processedFiles.insert(absSrc);//处理成功后，记录并实时保存断点
+                    saveContinueRecord();
+
                     if (p_.moveMode && !QFile::remove(absSrc))
                         emit logMsg(QStringLiteral("  [警告] 已复制到目标，但删除源文件失败: %1").arg(absSrc));
                     emit logMsg(QString("  [成功] %1 -> %2").arg(path, realTarget));
@@ -400,9 +471,16 @@ void Worker::run()
         }
         emit progress(i + 1, total);//进度条
     }
+
     if (!quarantine.isEmpty())
     {
         emit logMsg(QStringLiteral("共有 %1 个文件/目录被隔离忽略。").arg(quarantine.size()));
+    }
+
+    if (!p_.ContinueFilePath.isEmpty() && QFile::exists(p_.ContinueFilePath))
+    {
+        QFile::remove(p_.ContinueFilePath);
+        emit logMsg("任务已全部完成，已清理断点记录。");
     }
 
     emit finished(found, copiedN, missing, failed, false);
@@ -574,11 +652,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     main->addLayout(row4);
 
 
-    //按钮和进度
+    //开始按钮和进度
     auto* row5 = new QHBoxLayout;
     startBtn = new QPushButton("开始");
     connect(startBtn, &QPushButton::clicked, this, &MainWindow::start);
     row5->addWidget(startBtn);
+
+    //暂停按钮
+    pauseBtn = new QPushButton("暂停");
+    pauseBtn->setEnabled(false);
+    connect(pauseBtn, &QPushButton::clicked, this, &MainWindow::onPauseClicked);
+    row5->addWidget(pauseBtn);
+    //继续按钮
+    continueBtn = new QPushButton("继续");
+    continueBtn->setEnabled(false);
+    connect(continueBtn, &QPushButton::clicked, this, &MainWindow::onContinueClicked);
+    row5->addWidget(continueBtn);
+
+    pauseStatusLabel = new QLabel("");
+    row5->addWidget(pauseStatusLabel);
+    //停止按钮
     stopBtn = new QPushButton("停止");
     stopBtn->setEnabled(false);
     connect(stopBtn, &QPushButton::clicked, [this]
@@ -621,6 +714,29 @@ MainWindow::~MainWindow()
         worker_ = nullptr;
         delete thread_;
         thread_ = nullptr;
+    }
+}
+
+void MainWindow::onPauseClicked()
+{
+    if (worker_)
+    {
+        worker_->requestPause();
+        pauseBtn->setEnabled(false);
+        continueBtn->setEnabled(true);
+        statusLabel->setText("已暂停");
+    }
+}
+
+void MainWindow::onContinueClicked()
+{
+    if (worker_)
+    {
+        worker_->requestContinue();
+        pauseBtn->setEnabled(true);
+        continueBtn->setEnabled(false);
+        statusLabel->setText("运行中...");
+        pauseStatusLabel->setText("");
     }
 }
 
@@ -696,6 +812,31 @@ void MainWindow::start()
 
     p.previewMode = false; //不是预览模式
 
+    //断点继续检查是否存在记录
+    p.ContinueFilePath = QDir(dst).filePath(".fc_resume.json");
+    if (QFile::exists(p.ContinueFilePath))
+    {
+        if (QMessageBox::question(this, "发现断点", "检测到目标文件夹有未完成的运行记录，是否继续上次任务？", QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+        {
+            QFile file(p.ContinueFilePath);
+            if (file.open(QIODevice::ReadOnly))
+            {
+                QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+                QJsonObject root = doc.object();
+                QJsonArray arr = root["processedFiles"].toArray();
+                for (int i = 0; i < arr.size(); ++i)
+                {
+                    p.processedFiles.insert(arr[i].toString());
+                }
+                logEdit->append(QString("已加载断点记录，将跳过 %1 个已处理文件。").arg(p.processedFiles.size()));
+            }
+        }
+        else
+        {
+            QFile::remove(p.ContinueFilePath);//如果不继续，就覆盖当前参数，删除旧记录
+        }
+    }
+
     lastDst_ = dst;
 
     logEdit->clear();
@@ -703,6 +844,10 @@ void MainWindow::start()
     statusLabel->setText("运行中...");
     startBtn->setEnabled(false);
     stopBtn->setEnabled(true);
+
+    pauseBtn->setEnabled(true);//启用暂停按钮
+    continueBtn->setEnabled(false);
+    pauseStatusLabel->setText("");
 
     worker_ = new Worker(p);
     thread_ = new QThread;
@@ -716,6 +861,16 @@ void MainWindow::start()
         statusLabel->setText(QString("%1 / %2").arg(c).arg(t));
     });
     connect(worker_, &Worker::finished, this, &MainWindow::onFinished);
+
+    //接收暂停状态更新，显示暂停次数
+    connect(worker_, &Worker::Paused, this, [this](int count)
+    {
+        pauseStatusLabel->setText(QString("(已暂停 %1 次)").arg(count));
+    });
+    connect(worker_, &Worker::Continue, this, [this]()
+    {
+        pauseStatusLabel->setText("");
+    });
 
 // 跨线程询问：BlockingQueuedConnection 让子线程等待主线程结果
     connect(worker_, &Worker::askSignal, this,[this](const QString& text, const QString& target, int* result)
@@ -743,6 +898,11 @@ void MainWindow::onFinished(int found, int copied, QStringList missing, QStringL
 
     startBtn->setEnabled(true);
     stopBtn->setEnabled(false);
+
+    pauseBtn->setEnabled(false); //运行结束，禁用暂停按钮
+    continueBtn->setEnabled(false);
+    pauseStatusLabel->setText("");
+
     statusLabel->setText(aborted ? "已停止" : "完成");
     progress->setValue(0);
     if(thread_)
