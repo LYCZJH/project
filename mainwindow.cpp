@@ -17,28 +17,39 @@
 #include <QDateTime>
 #include <QEventLoop>
 #include <QTimer>
+#include <utility>
 
 //源可读/目标可创建/探测文件
 bool Worker::preflight()
 {
 // 源文件夹
-    QFileInfo srcInfo(p_.src_file);
-    if (!srcInfo.isDir() || !srcInfo.isReadable())
+    for (const QString& src : std::as_const(p_.src_files))
     {
-        emit logMsg(QStringLiteral(" [警告] 源文件夹不可读: %1").arg(p_.src_file));
-        int d = askUser(QStringLiteral("源文件夹不存在或无读权限"), p_.src_file);
-        if (d == Abort) return false;
-        srcInfo.refresh();
-        if (!srcInfo.isDir() || !srcInfo.isReadable()) return false;
+        QFileInfo srcInfo(src);
+        if (!srcInfo.isDir() || !srcInfo.isReadable())
+        {
+            emit logMsg(QStringLiteral(" [警告] 源文件夹不可读: %1").arg(src));
+            int d = askUser(QStringLiteral("源文件夹不存在或无读权限"), src);
+            if (d == Abort) return false;
+            srcInfo.refresh();
+            if (!srcInfo.isDir() || !srcInfo.isReadable()) return false;
+        }
     }
 //删除源文件需要写权限
-    if (p_.moveMode && !srcInfo.isWritable())
+    if (p_.moveMode)
     {
-        emit logMsg(QStringLiteral(" [警告] 移动模式要求源文件夹可写: %1").arg(p_.src_file));
-        int d = askUser(QStringLiteral("移动模式需要删除源文件，但源目录无写权限"), p_.src_file);
-        if (d == Abort) return false;
-        srcInfo.refresh();
-        if (!srcInfo.isWritable()) return false;
+        for (const QString& src : std::as_const(p_.src_files))
+        {
+            QFileInfo srcInfo(src);
+            if (!srcInfo.isWritable())
+            {
+                emit logMsg(QStringLiteral(" [警告] 移动模式要求源文件夹可写: %1").arg(src));
+                int d = askUser(QStringLiteral("移动模式需要删除源文件，但源目录无写权限"), src);
+                if (d == Abort) return false;
+                srcInfo.refresh();
+                if (!srcInfo.isWritable()) return false;
+            }
+        }
     }
 //目标文件夹：创建
     QDir dstDir(p_.dst_file);
@@ -72,9 +83,11 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
 {
     QSet<QString> visitedDirs;
     QStringList stack;
-    stack << p_.src_file;
-    visitedDirs << QFileInfo(p_.src_file).canonicalFilePath();
-
+    for (const QString& src : std::as_const(p_.src_files))//将所有源文件夹加入扫描队列
+    {
+        stack << src;
+        visitedDirs << QFileInfo(src).canonicalFilePath();
+    }
     int count = 0;
     while (!stack.isEmpty())
     {
@@ -89,7 +102,11 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
             continue;
         }
 
-        const auto entries = QDir(dirPath).entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        QDir::Filters filters = QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot;
+        if (p_.hidden) filters |= QDir::Hidden;
+        if (p_.system) filters |= QDir::System;
+
+        const auto entries = QDir(dirPath).entryInfoList(filters, QDir::Name);
 
         for (const QFileInfo &fi : entries)
         {
@@ -356,14 +373,15 @@ void Worker::run()
                 {
                     emit logMsg(QStringLiteral("  [警告] 磁盘空间不足: %1（需 %2 字节）").arg(target).arg(fileSize));
                     int d = askUser(QStringLiteral("目标磁盘剩余空间不足（本文件需要 %1 字节）").arg(fileSize), target);
-                    if (d == 2 || stop_.load())
+
+                    if (d == Abort || stop_.load())
                     {
                         emit finished(found, copiedN, missing, failed, true);
                         return;
                     }
-                    si.refresh();//刷新磁盘
-                    if (d != 1 || si.bytesAvailable() < fileSize)
-                        continue;                          // 跳过该文件
+                    si.refresh();
+                    if (d != Retry || si.bytesAvailable() < fileSize)
+                        continue;                       // 跳过该文件
                 }
 //复制文件
                 if (QFile::copy(path, realTarget))
@@ -545,6 +563,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     modeCombo->setToolTip("移动");
     row4->addWidget(modeCombo);
 
+    hiddenChk = new QCheckBox("包含隐藏文件");
+    hiddenChk->setToolTip("包含带隐藏属性的文件");
+    row4->addWidget(hiddenChk);
+    systemChk = new QCheckBox("包含系统文件");
+    systemChk->setToolTip("包含带系统属性的文件");
+    row4->addWidget(systemChk);
+
     row4->addStretch();
     main->addLayout(row4);
 
@@ -589,9 +614,13 @@ MainWindow::~MainWindow()
     if (thread_)
     {
         if (worker_)
-        worker_->requestStop();
+            worker_->requestStop();
         thread_->quit();
         thread_->wait();
+        delete worker_;
+        worker_ = nullptr;
+        delete thread_;
+        thread_ = nullptr;
     }
 }
 
@@ -654,13 +683,19 @@ void MainWindow::start()
     }
 
     Worker::Params p;
-    p.src_file = src;
+    p.src_files.append(src);//单源路径放入多源数组非预览模式
     p.dst_file = dst;
     p.names = names;
     p.subfolder = recurseChk->isChecked();
     p.fuzzy = fuzzyChk->isChecked();
     p.combobox = conflictCombo->currentIndex();
     p.moveMode = (modeCombo->currentIndex() == 1);
+
+    p.hidden = hiddenChk->isChecked();
+    p.system = systemChk->isChecked();
+
+    p.previewMode = false; //不是预览模式
+
     lastDst_ = dst;
 
     logEdit->clear();
@@ -710,12 +745,16 @@ void MainWindow::onFinished(int found, int copied, QStringList missing, QStringL
     stopBtn->setEnabled(false);
     statusLabel->setText(aborted ? "已停止" : "完成");
     progress->setValue(0);
-    thread_->quit();
-    thread_->wait();
-    delete worker_;
-    worker_ = nullptr;
-    delete thread_;
-    thread_ = nullptr;
+    if(thread_)
+    {
+        thread_->quit();
+        thread_->wait();
+        delete worker_;
+        worker_ = nullptr;
+        delete thread_;
+        thread_ = nullptr;
+    }
+
 
     QString msg = QString("匹配到 %1 个文件名\n复制成功 %2 个\n未找到 %3 个").arg(found).arg(copied).arg(missing.size());
     if (!failed.isEmpty())
@@ -867,7 +906,7 @@ void MainWindow::onPreviewClicked()
 
 //构建预览参数
     Worker::Params p;
-    p.src_file = src;
+    p.src_files.append(src);
     p.names = names;
     p.subfolder = recurseChk->isChecked();
     p.fuzzy = fuzzyChk->isChecked();
@@ -901,6 +940,20 @@ void MainWindow::onPreviewClicked()
             this->startBtn->setEnabled(true);
         });
     });
+
+//补充连接askSignal防止预览时遇到异常
+    connect(previewWorker, &Worker::askSignal, this,[this](const QString& text, const QString& target, int* result)
+            {
+        QMessageBox box(QMessageBox::Warning, "处理异常",text + "\n\n文件: " + QFileInfo(target).fileName(),QMessageBox::NoButton, this);
+        QPushButton* btnRetry = box.addButton("重试",    QMessageBox::AcceptRole);
+        QPushButton* btnSkip  = box.addButton("跳过此文件", QMessageBox::RejectRole);
+        QPushButton* btnAbort = box.addButton("中止全部", QMessageBox::DestructiveRole);
+        box.setDefaultButton(btnRetry);
+        box.exec();
+                if (box.clickedButton() == btnRetry) *result = Worker::Retry;
+                else if (box.clickedButton() == btnSkip) *result = Worker::Skip;
+                else *result = Worker::Abort;
+            }, Qt::BlockingQueuedConnection);
 
 //连接信号：当线程结束时结束事件循环
     connect(previewWorker, &Worker::finished, &loop, &QEventLoop::quit);

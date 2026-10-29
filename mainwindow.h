@@ -15,6 +15,7 @@
 #include <QStringList>
 #include <QListWidget>
 #include <QTextStream>
+#include <QVector>
 
 //后台工作线程
 class Worker : public QObject {
@@ -23,7 +24,8 @@ class Worker : public QObject {
 public:
     struct Params
     {
-        QString src_file;//源文件
+        QVector<QString> src_files;
+        //QString src_file;//源文件
         QString dst_file;//目标
         QStringList names;//查找
         bool subfolder = true;//子文件
@@ -32,6 +34,9 @@ public:
 
         bool previewMode = false; //标记是否处于预览模式
         bool moveMode = false; // true移动(复制后删除源)false复制
+
+        bool hidden = false;   //是否包含隐藏文件
+        bool system = false;     //是否包含系统文件
     };
 
     enum Decision { Retry = 0, Skip = 1, Abort = 2 };
@@ -105,6 +110,9 @@ private:
 
     QComboBox* modeCombo = nullptr;//复制/移动模式
     QStringList lastMissing_, lastFailed_; //上次运行的未找到/失败清单
+
+    QCheckBox* hiddenChk = nullptr;
+    QCheckBox* systemChk = nullptr;
 };
 
 #endif // MAINWINDOW_H
