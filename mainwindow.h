@@ -19,6 +19,10 @@
 #include <mutex>              //暂停互斥锁
 #include <condition_variable> //暂停条件变量
 #include <QSet>               //用于记录已处理文件
+#include <QThread>       // QThread::msleep
+#include <QTabWidget>    // 日志/未找到/失败 Tab
+#include <QListWidget>   // 未找到/失败列表
+#include <QGroupBox>     // 统计面板
 
 //后台工作线程
 class Worker : public QObject {
@@ -70,6 +74,8 @@ signals:
     //暂停状态信号
     void Paused(int count);
     void Continue();
+
+    void statsUpdated(int matched, int copied, int skipped, int missing, int failed);
 
 private:
     QStringList matchName(const QString& name,const QMap<QString, QStringList>& full,const QMap<QString, QStringList>& stem);
@@ -152,6 +158,17 @@ private:
     QPushButton*pauseBtn = nullptr;
     QPushButton*continueBtn = nullptr;
     QLabel*pauseStatusLabel = nullptr;
+
+    //结果统计面板
+    QLabel *matchCountLabel  = nullptr;
+    QLabel *copiedCountLabel = nullptr;
+    QLabel *skippedCountLabel= nullptr;
+    QLabel *missingCountLabel= nullptr;
+    QLabel *failedCountLabel = nullptr;
+    //日志  未找到  失败 分 Tab
+    QTabWidget  *logTabWidget      = nullptr;
+    QListWidget *missingListWidget = nullptr;
+    QListWidget *failedListWidget  = nullptr;
 };
 
 #endif // MAINWINDOW_H

@@ -322,6 +322,7 @@ void Worker::run()
     QStringList quarantine, missing, failed, skipped;
     QSet<QString> copied;
     int found = 0, copiedN = 0;
+    int skippedN = 0;//跳过计数
     emit logMsg(p_.moveMode ? "操作模式：移动" : "操作模式：复制");
 //管道级预检
     if (!preflight())
@@ -357,6 +358,8 @@ void Worker::run()
         {
             skipped << QStringLiteral("[%1]：%2").arg(name, why);
             emit logMsg(QStringLiteral("  [格式错误，已跳过] [%1]：%2").arg(name, why));
+            ++skippedN;//累加跳过计数并实时刷新统计
+            emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
             emit progress(i + 1, total);
             continue;
         }
@@ -367,6 +370,7 @@ void Worker::run()
         {
             missing << name;
             emit logMsg(QStringLiteral("未找到: %1").arg(name));
+            emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());//实时刷新统计
             emit progress(i + 1, total);
             continue;
         }
@@ -417,16 +421,36 @@ void Worker::run()
                 if (p_.combobox == 2)
                 {
                     emit logMsg(QStringLiteral("  [跳过] %1").arg(fi.fileName()));
+                    ++skippedN;//冲突跳过计入跳过数
+                    emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
                     continue;
                 }
                 else if (p_.combobox == 1)
                 {
-                    if (!QFile::remove(realTarget))
+                    //覆盖模式下删除失败，支持"重试/跳过/中止"
+                    bool removed = QFile::remove(realTarget);
+                    while (!removed && !stop_.load())
+                    {
+                        emit logMsg(QStringLiteral("  [覆盖失败] 目标文件可能被占用: %1").arg(realTarget));
+                        int d = askUser(QStringLiteral("覆盖失败，目标文件可能被占用或权限临时不足"), realTarget);
+                        if (d == Abort || stop_.load())
+                        {
+                            failed << path;
+                            emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
+                            emit finished(found, copiedN, missing, failed, true);
+                            return;
+                        }
+                        if (d == Skip) break;
+                        QThread::msleep(200);
+                        removed = QFile::remove(realTarget);
+                    }
+
+                    if (!removed)
                     {
                         quarantine << QStringLiteral("目标被占用: %1").arg(realTarget);
                         continue;
                     }
-                }
+                }                
                 else
                 {
                     realTarget = uniquePath(p_.dst_file, fi.fileName());
@@ -448,10 +472,52 @@ void Worker::run()
                     }
                     si.refresh();
                     if (d != Retry || si.bytesAvailable() < fileSize)
-                        continue;                       // 跳过该文件
+                    {
+                        ++skippedN;
+                    emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());//磁盘不足导致跳过也计入
+                        continue;
+                    }                    // 跳过该文件
                 }
-//复制文件
-                if (QFile::copy(path, realTarget))
+
+//复制文件，失败重试
+                bool copyOk   = false;
+                bool giveUp   = false;
+                bool aborted  = false;
+                while (!copyOk && !giveUp && !stop_.load())
+                {
+                    if (QFile::copy(path, realTarget))
+                    {
+                        copyOk = true;
+                    }
+                    else
+                    {
+                        emit logMsg(QStringLiteral("  [复制失败] %1（可能被占用或权限临时不足）").arg(path));
+                        int d = askUser(QStringLiteral("复制失败，文件可能被占用或权限临时不足"), path);
+                        if (d == Abort || stop_.load())
+                        {
+                            failed << path;
+                            aborted = true;
+                            break;
+                        }
+                        if (d == Skip)
+                        {
+                            giveUp = true;    //跳过该文件
+                        }
+                        else
+                        {
+                            QThread::msleep(200);   // Retry前等待
+                        }
+                    }
+                }
+
+                if (aborted)
+                {
+                    emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
+                    emit finished(found, copiedN, missing, failed, true);
+                    return;
+                }
+
+                if (copyOk)
                 {
                     copied.insert(absSrc);
                     ++copiedN;
@@ -463,12 +529,14 @@ void Worker::run()
                         emit logMsg(QStringLiteral("  [警告] 已复制到目标，但删除源文件失败: %1").arg(absSrc));
                     emit logMsg(QString("  [成功] %1 -> %2").arg(path, realTarget));
                 }
-                else
+                else if (giveUp)
                 {
                     failed << path;
-                    emit logMsg(QString("  [失败] %1").arg(path));
+                    emit logMsg(QString("  [已跳过失败] %1").arg(path));
                 }
         }
+
+        emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());//每个文件名处理完刷新统计
         emit progress(i + 1, total);//进度条
     }
 
@@ -483,6 +551,7 @@ void Worker::run()
         emit logMsg("任务已全部完成，已清理断点记录。");
     }
 
+    emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size()); //结束时刷新一次最终统计
     emit finished(found, copiedN, missing, failed, false);
 
 }
@@ -554,7 +623,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     setCentralWidget(centralWidget);
 
     setWindowTitle("文件批量查找复制工具");
-    resize(880, 720);
+    resize(1000,900);//修改大小
     auto* main = new QVBoxLayout(centralWidget); // 布局挂载到中心部件上
 
     //源文件夹
@@ -658,32 +727,95 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(startBtn, &QPushButton::clicked, this, &MainWindow::start);
     row5->addWidget(startBtn);
 
-    //暂停按钮
     pauseBtn = new QPushButton("暂停");
     pauseBtn->setEnabled(false);
     connect(pauseBtn, &QPushButton::clicked, this, &MainWindow::onPauseClicked);
     row5->addWidget(pauseBtn);
-    //继续按钮
+
     continueBtn = new QPushButton("继续");
     continueBtn->setEnabled(false);
     connect(continueBtn, &QPushButton::clicked, this, &MainWindow::onContinueClicked);
     row5->addWidget(continueBtn);
 
-    pauseStatusLabel = new QLabel("");
-    row5->addWidget(pauseStatusLabel);
-    //停止按钮
     stopBtn = new QPushButton("停止");
     stopBtn->setEnabled(false);
     connect(stopBtn, &QPushButton::clicked, [this]
-    {
-        if (worker_) worker_->requestStop();
-    });
+            {
+                if (worker_) worker_->requestStop();
+            });
     row5->addWidget(stopBtn);
+
+    // 把状态标签移到按钮组后面，防止它撑开按钮之间的间距
+    pauseStatusLabel = new QLabel("");
+    // 给标签设定一个固定的最小宽度，防止出现文字时导致界面抖动
+    pauseStatusLabel->setMinimumWidth(100);
+    row5->addWidget(pauseStatusLabel);
+
+
+
+    // //暂停按钮
+    // pauseBtn = new QPushButton("暂停");
+    // pauseBtn->setEnabled(false);
+    // connect(pauseBtn, &QPushButton::clicked, this, &MainWindow::onPauseClicked);
+    // row5->addWidget(pauseBtn);
+    // //继续按钮
+    // continueBtn = new QPushButton("继续");
+    // continueBtn->setEnabled(false);
+    // connect(continueBtn, &QPushButton::clicked, this, &MainWindow::onContinueClicked);
+    // row5->addWidget(continueBtn);
+
+    // pauseStatusLabel = new QLabel("");
+    // row5->addWidget(pauseStatusLabel);
+    // //停止按钮
+    // stopBtn = new QPushButton("停止");
+    // stopBtn->setEnabled(false);
+    // connect(stopBtn, &QPushButton::clicked, [this]
+    // {
+    //     if (worker_) worker_->requestStop();
+    // });
+    // row5->addWidget(stopBtn);
+
     progress = new QProgressBar;
     row5->addWidget(progress, 1);
     statusLabel = new QLabel("就绪");
     row5->addWidget(statusLabel);
     main->addLayout(row5);
+
+    //结果统计面板
+    auto* statBox = new QGroupBox("结果统计");
+    auto* statLayout = new QHBoxLayout(statBox);
+    statLayout->setSpacing(10);
+    auto makeStatItem = [&](const QString& title, QLabel*& label) -> QWidget*
+    {
+        QWidget* w = new QWidget;
+        QVBoxLayout* v = new QVBoxLayout(w);
+        v->setContentsMargins(6, 2, 6, 2);
+        v->setSpacing(0);
+        QLabel* t = new QLabel(title);
+        t->setAlignment(Qt::AlignCenter);
+        QFont tf = t->font(); tf.setPointSize(9); t->setFont(tf);
+        t->setStyleSheet("color:#666;");
+        label = new QLabel("0");
+        label->setAlignment(Qt::AlignCenter);
+        QFont lf = label->font(); lf.setBold(true); lf.setPointSize(14); label->setFont(lf);
+        label->setMinimumWidth(60);
+        v->addWidget(t);
+        v->addWidget(label);
+        return w;
+    };
+    statLayout->addWidget(makeStatItem("匹配文件数", matchCountLabel));
+    statLayout->addWidget(makeStatItem("复制成功",   copiedCountLabel));
+    statLayout->addWidget(makeStatItem("跳过",       skippedCountLabel));
+    statLayout->addWidget(makeStatItem("未找到",     missingCountLabel));
+    statLayout->addWidget(makeStatItem("失败",       failedCountLabel));
+    statLayout->addStretch();
+
+    //成功绿，跳过橙，未找到/失败红
+    copiedCountLabel->setStyleSheet("color:#2e7d32;");
+    skippedCountLabel->setStyleSheet("color:#ef6c00;");
+    missingCountLabel->setStyleSheet("color:#c62828;");
+    failedCountLabel->setStyleSheet("color:#c62828;");
+    main->addWidget(statBox);
 
     //日志
     auto* rowLog = new QHBoxLayout;
@@ -695,11 +827,25 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     rowLog->addWidget(saveReportBtn);
     main->addLayout(rowLog);
 
+    //日志区域改为 TabWidget（运行日志 / 未找到 / 失败）
+    logTabWidget = new QTabWidget(this);
+
     logEdit = new QTextEdit;
     logEdit->setReadOnly(true);
     logEdit->setFont(QFont("Consolas", 9));
-    logEdit->setMinimumHeight(150);
-    main->addWidget(logEdit, 2);
+
+    logTabWidget->addTab(logEdit, "运行日志");
+
+    missingListWidget = new QListWidget;
+    missingListWidget->setFont(QFont("Consolas", 9));
+    logTabWidget->addTab(missingListWidget, "未找到 (0)");
+
+    failedListWidget = new QListWidget;
+    failedListWidget->setFont(QFont("Consolas", 9));
+    logTabWidget->addTab(failedListWidget, "失败 (0)");
+
+    logEdit->setMinimumHeight(180);
+    main->addWidget(logTabWidget, 2);
 }
 
 MainWindow::~MainWindow()
@@ -849,6 +995,20 @@ void MainWindow::start()
     continueBtn->setEnabled(false);
     pauseStatusLabel->setText("");
 
+    //重置统计与列表
+    matchCountLabel->setText("0");
+    copiedCountLabel->setText("0");
+    skippedCountLabel->setText("0");
+    missingCountLabel->setText("0");
+    failedCountLabel->setText("0");
+    missingListWidget->clear();
+    failedListWidget->clear();
+    logTabWidget->setTabText(1, "未找到 (0)");
+    logTabWidget->setTabText(2, "失败 (0)");
+    logTabWidget->setCurrentIndex(0); // 切回运行日志页
+    previewListWidget->clear();  //清空上次的预览列表
+    previewListWidget->setVisible(false);
+
     worker_ = new Worker(p);
     thread_ = new QThread;
     worker_->moveToThread(thread_);
@@ -860,6 +1020,20 @@ void MainWindow::start()
         progress->setValue(c);
         statusLabel->setText(QString("%1 / %2").arg(c).arg(t));
     });
+
+    //连接统计面板更新信号
+    connect(worker_, &Worker::statsUpdated, this, [this](int matched, int copied, int skipped, int missing, int failed)
+            {
+        matchCountLabel->setText(QString::number(matched));
+        copiedCountLabel->setText(QString::number(copied));
+        skippedCountLabel->setText(QString::number(skipped));
+        missingCountLabel->setText(QString::number(missing));
+        failedCountLabel->setText(QString::number(failed));
+
+        logTabWidget->setTabText(1, QString("未找到 (%1)").arg(missing));
+        logTabWidget->setTabText(2, QString("失败 (%1)").arg(failed));
+    });
+
     connect(worker_, &Worker::finished, this, &MainWindow::onFinished);
 
     //接收暂停状态更新，显示暂停次数
@@ -895,6 +1069,13 @@ void MainWindow::onFinished(int found, int copied, QStringList missing, QStringL
 {
     lastMissing_ = missing;
     lastFailed_  = failed;
+
+
+    missingListWidget->clear(); //把数据填充到下方的 Tab 列表中
+    missingListWidget->addItems(missing);
+    failedListWidget->clear();
+    failedListWidget->addItems(failed);
+
 
     startBtn->setEnabled(true);
     stopBtn->setEnabled(false);
