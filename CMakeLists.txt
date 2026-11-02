@@ -12,6 +12,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 
+option(UNIT_TEST "Build with unit tests" OFF)
+
 set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
@@ -57,6 +59,11 @@ set_target_properties(untitled PROPERTIES
     MACOSX_BUNDLE TRUE
     WIN32_EXECUTABLE TRUE
 )
+
+if(UNIT_TEST)
+    target_compile_definitions(untitled PRIVATE UNIT_TEST)
+    set_target_properties(untitled PROPERTIES WIN32_EXECUTABLE FALSE)
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS untitled

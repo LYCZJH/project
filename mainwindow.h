@@ -2,7 +2,6 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QThread>
 #include <atomic>
 #include <QLineEdit>
 #include <QPushButton>
@@ -12,17 +11,16 @@
 #include <QComboBox>
 #include <QProgressBar>
 #include <QMap>
-#include <QStringList>
 #include <QListWidget>
-#include <QTextStream>
 #include <QVector>
 #include <mutex>              //暂停互斥锁
 #include <condition_variable> //暂停条件变量
 #include <QSet>               //用于记录已处理文件
-#include <QThread>       // QThread::msleep
-#include <QTabWidget>    // 日志/未找到/失败 Tab
-#include <QListWidget>   // 未找到/失败列表
+#include <QThread>
+#include <QTabWidget>    // 日志/未找到/失败
 #include <QGroupBox>     // 统计面板
+#include <QDragEnterEvent>
+#include <QDropEvent>
 
 //后台工作线程
 class Worker : public QObject {
@@ -46,9 +44,8 @@ public:
         bool system = false;     //是否包含系统文件
 
         QSet<QString> processedFiles;// 记录已成功处理的文件路径
-        QString ContinueFilePath;       // 断点记录文件(.json)的保存路径
+        QString ContinueFilePath;       // 断点记录文件json的保存路径
     };
-
     enum Decision { Retry = 0, Skip = 1, Abort = 2 };
     Worker(const Params& p) : p_(p) {}
     void requestStop() { stop_ = true; requestContinue(); }
@@ -61,6 +58,10 @@ public:
         pauseCond_.notify_all();
     }
 
+    bool        illegalName(const QString& n, QString* why = nullptr) const;
+    QStringList matchName(const QString& name,const QMap<QString, QStringList>& full, const QMap<QString, QStringList>& stem);
+    QString     uniquePath(const QString& dir, const QString& fname);
+
 public slots:
     void run();
 
@@ -71,22 +72,19 @@ signals:
     void askSignal(const QString& text, const QString& target, int* result);
 
     void previewFinished(const QMap<QString, QStringList> &files);
-    //暂停状态信号
     void Paused(int count);
     void Continue();
 
     void statsUpdated(int matched, int copied, int skipped, int missing, int failed);
 
 private:
-    QStringList matchName(const QString& name,const QMap<QString, QStringList>& full,const QMap<QString, QStringList>& stem);
-    QString uniquePath(const QString& dir, const QString& fname);
+
     Params p_;
     std::atomic<bool> stop_{false};
     int askUser(const QString& text, const QString& target);
 
     bool preflight();
     bool scanPhase(QMap<QString,QStringList>& fullmap,QMap<QString,QStringList>& stemmap,QStringList& quarantine);
-    bool illegalName(const QString& n, QString* why = nullptr) const;
     Decision decision_ = Retry;
 
     std::atomic<bool> pauseFlag_{false};//是否处于暂停状态
@@ -94,7 +92,7 @@ private:
     std::mutex pauseMutex_;//线程锁
     std::condition_variable pauseCond_;//条件变量
     void checkPause();//检查暂停状态并阻塞
-    void saveContinueRecord();   //保存断点记录到 JSON
+    void saveContinueRecord();   //保存断点记录到json
 };
 
 //界面
@@ -103,6 +101,10 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
+
+    static QStringList parseNames(const QString& text);
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private slots:
 
@@ -117,13 +119,12 @@ private slots:
     void loadList();
     void saveList();
 
-    void saveReport();   // 保存日志+未找到/失败清单
+    void saveReport();   // 保存日志，未找到/失败清单
 
     void onPauseClicked();//暂停/继续界面槽
     void onContinueClicked();
 
 private:
-    static QStringList parseNames(const QString& text);
 
     QLineEdit*srcEdit = nullptr;
     QLineEdit*dstEdit = nullptr;
@@ -165,10 +166,10 @@ private:
     QLabel *skippedCountLabel= nullptr;
     QLabel *missingCountLabel= nullptr;
     QLabel *failedCountLabel = nullptr;
-    //日志  未找到  失败 分 Tab
-    QTabWidget  *logTabWidget      = nullptr;
-    QListWidget *missingListWidget = nullptr;
-    QListWidget *failedListWidget  = nullptr;
+
+    QTabWidget  *logTabWidget      = nullptr;  //日志
+    QListWidget *missingListWidget = nullptr;//未找到
+    QListWidget *failedListWidget  = nullptr;//失败
 };
 
 #endif // MAINWINDOW_H
