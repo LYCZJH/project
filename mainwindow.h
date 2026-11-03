@@ -47,7 +47,7 @@ public:
     };
     enum Decision { Retry = 0, Skip = 1, Abort = 2 };
     Worker(const Params& p) : p_(p) {}
-    void requestStop() { stop_ = true; requestContinue(); }
+    void requestStop() { stop = true; requestContinue(); }
     void setDecision(Decision d) { decision_ = d; }
 
     void requestPause() { pauseFlag_ = true; }
@@ -79,7 +79,7 @@ signals:
 private:
 
     Params p_;
-    std::atomic<bool> stop_{false};
+    std::atomic<bool> stop{false};
     int askUser(const QString& text, const QString& target);
 
     bool preflight();

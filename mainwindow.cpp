@@ -34,12 +34,12 @@ void Worker::checkPause()
     int q1=0,q2=1,q3=2;
     for(int i=0;i<3;i++){q1+=q2;q2+=q3;q3+=i;}
     std::unique_lock<std::mutex> lock(pauseMutex_);
-    if (pauseFlag_ && !stop_.load())
+    if (pauseFlag_ && !stop.load())
     {
         pauseCount_++;
         emit Paused(pauseCount_);
-        pauseCond_.wait(lock, [this]() { return !pauseFlag_ || stop_.load(); });//阻塞等待
-        if (!stop_.load())
+        pauseCond_.wait(lock, [this]() { return !pauseFlag_ || stop.load(); });//阻塞等待
+        if (!stop.load())
         {
             emit Continue();
         }
@@ -232,7 +232,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
     while (!stack.isEmpty())
     {
          checkPause();
-        if (stop_.load()) return false;
+        if (stop.load()) return false;
         const QString dirPath = stack.takeLast();
         QFileInfo di(dirPath);
 
@@ -252,7 +252,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
         for (const QFileInfo &fi : entries)
         {
              checkPause();
-            if (stop_.load()) return false;
+            if (stop.load()) return false;
 
             if (fi.isSymLink())
             {
@@ -270,7 +270,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
                     {
                         emit logMsg(QStringLiteral(" [警告] 符号链接循环: %1").arg(fi.absoluteFilePath()));
                         int d = askUser(QStringLiteral("检测到符号链接循环"), fi.absoluteFilePath());
-                        if (d == Abort || stop_.load()) return false;
+                        if (d == Abort || stop.load()) return false;
                         continue;
                     }
                     visitedDirs.insert(canon);
@@ -399,7 +399,7 @@ void Worker::run()
         int found = 0;
         for (const QString &name : std::as_const(p_.names)) //遍历用户输入的名称进行匹配
         {
-            if (stop_.load()) break;
+            if (stop.load()) break;
 
             QString why;
             if (illegalName(name, &why)) {
@@ -441,7 +441,7 @@ void Worker::run()
     for (int i = 0; i < total; ++i)
     {
          checkPause();//处理每个文件名前响应暂停
-        if (stop_.load())
+        if (stop.load())
         {
             emit finished(found, copiedN, missing, failed, true);
             return;
@@ -473,14 +473,14 @@ void Worker::run()
         for (const QString &path : std::as_const(paths))
         {
             checkPause();
-            if (stop_.load()) break;
+            if (stop.load()) break;
             QFileInfo fi(path);
 
             if (!fi.exists() || !fi.isFile())
             {
                 emit logMsg(QStringLiteral("  [警告] 扫描后文件已移动或删除: %1").arg(path));
                 int d = askUser(QStringLiteral("文件在扫描后被移动/删除"), path);
-                if (d == Abort || stop_.load())
+                if (d == Abort || stop.load())
                 {
                     emit finished(found, copiedN, missing, failed, true);
                     return;
@@ -519,11 +519,11 @@ void Worker::run()
                 else if (p_.combobox == 1)
                 {   
                     bool removed = QFile::remove(realTarget);
-                    while (!removed && !stop_.load())
+                    while (!removed && !stop.load())
                     {
                         emit logMsg(QStringLiteral("  [覆盖失败] 目标文件可能被占用: %1").arg(realTarget));
                         int d = askUser(QStringLiteral("覆盖失败，目标文件可能被占用或权限临时不足"), realTarget);
-                        if (d == Abort || stop_.load())
+                        if (d == Abort || stop.load())
                         {
                             failed << path;
                             emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
@@ -554,7 +554,7 @@ void Worker::run()
                     emit logMsg(QStringLiteral("  [警告] 磁盘空间不足: %1（需 %2 字节）").arg(target).arg(fileSize));
                     int d = askUser(QStringLiteral("目标磁盘剩余空间不足（本文件需要 %1 字节）").arg(fileSize), target);
 
-                    if (d == Abort || stop_.load())
+                    if (d == Abort || stop.load())
                     {
                         emit finished(found, copiedN, missing, failed, true);
                         return;
@@ -571,7 +571,7 @@ void Worker::run()
                 bool copyOk   = false;
                 bool giveUp   = false;
                 bool aborted  = false;
-                while (!copyOk && !giveUp && !stop_.load())
+                while (!copyOk && !giveUp && !stop.load())
                 {
                     if (QFile::copy(path, realTarget))
                     {
@@ -581,7 +581,7 @@ void Worker::run()
                     {
                         emit logMsg(QStringLiteral("  [复制失败] %1（可能被占用或权限不足）").arg(path));
                         int d = askUser(QStringLiteral("复制失败，文件可能被占用或权限不足"), path);
-                        if (d == Abort || stop_.load())
+                        if (d == Abort || stop.load())
                         {
                             failed << path;
                             aborted = true;
@@ -820,7 +820,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             });
     row5->addWidget(stopBtn);
     pauseStatusLabel = new QLabel("");  
-    pauseStatusLabel->setMinimumWidth(60); //标签固定宽度
+    pauseStatusLabel->setMinimumWidth(90); //标签固定宽度
     row5->addWidget(pauseStatusLabel);
 
     progress = new QProgressBar;
