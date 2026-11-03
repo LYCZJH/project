@@ -13,16 +13,15 @@
 #include <QMap>
 #include <QListWidget>
 #include <QVector>
-#include <mutex>              //暂停互斥锁
-#include <condition_variable> //暂停条件变量
-#include <QSet>               //用于记录已处理文件
+#include <mutex>
+#include <condition_variable>
+#include <QSet>
 #include <QThread>
-#include <QTabWidget>    // 日志/未找到/失败
-#include <QGroupBox>     // 统计面板
+#include <QTabWidget>
+#include <QGroupBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 
-//后台工作线程
 class Worker : public QObject {
     Q_OBJECT
 
@@ -38,7 +37,7 @@ public:
         int combobox = 0;//下拉框
 
         bool previewMode = false; //标记是否处于预览模式
-        bool moveMode = false; // true移动(复制后删除源)false复制
+        bool moveMode = false; // true移动false复制
 
         bool hidden = false;   //是否包含隐藏文件
         bool system = false;     //是否包含系统文件
@@ -90,12 +89,11 @@ private:
     std::atomic<bool> pauseFlag_{false};//是否处于暂停状态
     std::atomic<int> pauseCount_{0}; //暂停次数
     std::mutex pauseMutex_;//线程锁
-    std::condition_variable pauseCond_;//条件变量
-    void checkPause();//检查暂停状态并阻塞
+    std::condition_variable pauseCond_;
+    void checkPause();
     void saveContinueRecord();   //保存断点记录到json
 };
 
-//界面
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -119,9 +117,9 @@ private slots:
     void loadList();
     void saveList();
 
-    void saveReport();   // 保存日志，未找到/失败清单
+    void saveReport();   // 保存日志
 
-    void onPauseClicked();//暂停/继续界面槽
+    void onPauseClicked();
     void onContinueClicked();
 
 private:
@@ -150,8 +148,8 @@ private:
 
     QListWidget *previewListWidget;
 
-    QComboBox* modeCombo = nullptr;//复制/移动模式
-    QStringList lastMissing_, lastFailed_; //上次运行的未找到/失败清单
+    QComboBox* modeCombo = nullptr;//复制移动模式
+    QStringList lastMissing_, lastFailed_; //上次运行的未找到失败清单
 
     QCheckBox* hiddenChk = nullptr;
     QCheckBox* systemChk = nullptr;
@@ -160,14 +158,13 @@ private:
     QPushButton*continueBtn = nullptr;
     QLabel*pauseStatusLabel = nullptr;
 
-    //结果统计面板
     QLabel *matchCountLabel  = nullptr;
     QLabel *copiedCountLabel = nullptr;
     QLabel *skippedCountLabel= nullptr;
     QLabel *missingCountLabel= nullptr;
     QLabel *failedCountLabel = nullptr;
 
-    QTabWidget  *logTabWidget      = nullptr;  //日志
+    QTabWidget  *logTabWidget      = nullptr;//日志
     QListWidget *missingListWidget = nullptr;//未找到
     QListWidget *failedListWidget  = nullptr;//失败
 };
