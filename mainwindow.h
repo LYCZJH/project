@@ -44,22 +44,25 @@ public:
 
         QSet<QString> processedFiles;// 记录已成功处理的文件路径
         QString ContinueFilePath;       // 断点记录文件json的保存路径
+        QSet<QString> pendingDeletes;  //已复制但删除源失败的文件
     };
     enum Decision { Retry = 0, Skip = 1, Abort = 2 };
-    Worker(const Params& p) : p_(p) {}
+    Worker(const Params& p) : p(p) {}
     void requestStop() { stop = true; requestContinue(); }
-    void setDecision(Decision d) { decision_ = d; }
+    void setDecision(Decision d) { decision = d; }
 
-    void requestPause() { pauseFlag_ = true; }
+    void requestPause() { pauseFlag = true; }
     void requestContinue()
     {
-        pauseFlag_ = false;
-        pauseCond_.notify_all();
+        pauseFlag = false;
+        pauseCond.notify_all();
     }
 
     bool        illegalName(const QString& n, QString* why = nullptr) const;
     QStringList matchName(const QString& name,const QMap<QString, QStringList>& full, const QMap<QString, QStringList>& stem);
     QString     uniquePath(const QString& dir, const QString& fname);
+
+    static QString computeTaskSignature(const Params& p);
 
 public slots:
     void run();
@@ -78,18 +81,18 @@ signals:
 
 private:
 
-    Params p_;
+    Params p;
     std::atomic<bool> stop{false};
     int askUser(const QString& text, const QString& target);
 
     bool preflight();
     bool scanPhase(QMap<QString,QStringList>& fullmap,QMap<QString,QStringList>& stemmap,QStringList& quarantine);
-    Decision decision_ = Retry;
+    Decision decision = Retry;
 
-    std::atomic<bool> pauseFlag_{false};//是否处于暂停状态
-    std::atomic<int> pauseCount_{0}; //暂停次数
-    std::mutex pauseMutex_;//线程锁
-    std::condition_variable pauseCond_;
+    std::atomic<bool> pauseFlag{false};//是否处于暂停状态
+    std::atomic<int> pauseCount{0}; //暂停次数
+    std::mutex pauseMutex;//线程锁
+    std::condition_variable pauseCond;
     void checkPause();
     void saveContinueRecord();   //保存断点记录到json
 };
@@ -142,14 +145,14 @@ private:
     QPushButton*stopBtn = nullptr;
 
     QProgressBar*progress = nullptr;
-    Worker*worker_ = nullptr;
-    QThread*thread_ = nullptr;
-    QString lastDst_;
+    Worker*worker = nullptr;
+    QThread*thread = nullptr;
+    QString lastDst;
 
     QListWidget *previewListWidget;
 
     QComboBox* modeCombo = nullptr;//复制移动模式
-    QStringList lastMissing_, lastFailed_; //上次运行的未找到失败清单
+    QStringList lastMissing, lastFailed; //上次运行的未找到失败清单
 
     QCheckBox* hiddenChk = nullptr;
     QCheckBox* systemChk = nullptr;

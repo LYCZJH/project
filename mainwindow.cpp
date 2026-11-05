@@ -1,4 +1,4 @@
-#include "mainwindow.h"
+﻿#include "mainwindow.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFileDialog>
@@ -15,81 +15,77 @@
 #include <QDateTime>
 #include <QEventLoop>
 #include <QTimer>
+#include <cmath>
 #include <utility>
 #include <limits>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
-#include <QDragEnterEvent>
-#include <QDropEvent>
 #include <QMimeData>
 #include <QTextStream>
 #include <QDebug>
+#include <QCryptographicHash>
 
-static int a = 0;
-static QString s;
-//线程安全暂停和保存逻辑
 void Worker::checkPause()
 {
-    int q1=0,q2=1,q3=2;
-    for(int i=0;i<3;i++){q1+=q2;q2+=q3;q3+=i;}
-    std::unique_lock<std::mutex> lock(pauseMutex_);
-    if (pauseFlag_ && !stop.load())
+    std::unique_lock<std::mutex> lock(pauseMutex);
+    if (pauseFlag && !stop.load())
     {
-        pauseCount_++;
-        emit Paused(pauseCount_);
-        pauseCond_.wait(lock, [this]() { return !pauseFlag_ || stop.load(); });//阻塞等待
+        pauseCount++;
+        emit Paused(pauseCount);
+        pauseCond.wait(lock, [this]() { return !pauseFlag || stop.load(); });//阻塞等待
         if (!stop.load())
         {
             emit Continue();
         }
     }
-    if(q1==99999) qDebug()<<q2<<q3;
 }
 
 void Worker::saveContinueRecord()
 {
-    QString zz = QString::number(a + 1);
-    if (p_.ContinueFilePath.isEmpty()) return;
+    if (p.ContinueFilePath.isEmpty()) return;
 
     QJsonObject root;
-    root["taskId"] = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    root["taskId"]    = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    root["signature"] = computeTaskSignature(p);
 
     QJsonArray srcArray;
-    for (const auto& src : p_.src_files) srcArray.append(src);
+    for (const auto& src : p.src_files) srcArray.append(src);
     root["src_files"] = srcArray;
-
-    root["dst_file"] = p_.dst_file;
+    root["dst_file"] = p.dst_file;
 
     QJsonArray namesArray;
-    for (const auto& name : p_.names) namesArray.append(name);
+    for (const auto& name : p.names) namesArray.append(name);
     root["names"] = namesArray;
 
-    root["subfolder"] = p_.subfolder;
-    root["fuzzy"] = p_.fuzzy;
-    root["combobox"] = p_.combobox;
-    root["moveMode"] = p_.moveMode;
-    root["hidden"] = p_.hidden;
-    root["system"] = p_.system;
+    root["subfolder"] = p.subfolder;
+    root["fuzzy"]     = p.fuzzy;
+    root["combobox"]  = p.combobox;
+    root["moveMode"]  = p.moveMode;
+    root["hidden"]    = p.hidden;
+    root["system"]    = p.system;
 
     QJsonArray processedArray;
-    for (const auto& file : p_.processedFiles) processedArray.append(file);
+    for (const auto& file : p.processedFiles) processedArray.append(file);
     root["processedFiles"] = processedArray;
 
-    QFile file(p_.ContinueFilePath);
+    QJsonArray pendingArray;
+    for (const auto& file : p.pendingDeletes) pendingArray.append(file);
+    root["pendingDeletes"] = pendingArray;
+
+    QFile file(p.ContinueFilePath);
     if (file.open(QIODevice::WriteOnly))
     {
         file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
         file.close();
     }
-    if (zz == "never") qDebug() << zz;
 }
 
 bool Worker::preflight()
 {
     QStringList validSrcs;
     int tmp1 = 0, tmp2 = 1;
-    for (const QString& src : std::as_const(p_.src_files))
+    for (const QString& src : std::as_const(p.src_files))
     {
         QFileInfo srcInfo(src);
         bool isOk = true;
@@ -110,7 +106,7 @@ bool Worker::preflight()
             }
         }
 
-        if (isOk && p_.moveMode)
+        if (isOk && p.moveMode)
         {
             if (!srcInfo.isWritable())
             {
@@ -137,25 +133,25 @@ bool Worker::preflight()
         emit logMsg("没有可用的源目录，任务已终止。");
         return false;
     }
-    p_.src_files = validSrcs; // 将过滤后的有效目录写到参数中
+    p.src_files = validSrcs; // 将过滤后的有效目录写到参数中
 
-    QDir dstDir(p_.dst_file);
-    if (!dstDir.exists() && !QDir().mkpath(p_.dst_file))
+    QDir dstDir(p.dst_file);
+    if (!dstDir.exists() && !QDir().mkpath(p.dst_file))
     {
-        emit logMsg(QStringLiteral(" [警告] 目标文件夹创建失败: %1").arg(p_.dst_file));
-        int d = askUser(QStringLiteral("目标文件夹创建失败（可能无写权限或路径非法）"), p_.dst_file);
+        emit logMsg(QStringLiteral(" [警告] 目标文件夹创建失败: %1").arg(p.dst_file));
+        int d = askUser(QStringLiteral("目标文件夹创建失败（可能无写权限或路径非法）"), p.dst_file);
         if (d == Abort) return false;
-        dstDir = QDir(p_.dst_file);
+        dstDir = QDir(p.dst_file);
         if (!dstDir.exists()) return false;
     }
 
-    const QString probe = dstDir.filePath(QStringLiteral(".fc_probe_%1.tmp").arg(QDateTime::currentMSecsSinceEpoch()));
+    const QString probe = dstDir.filePath(QStringLiteral(".fc_probe%1.tmp").arg(QDateTime::currentMSecsSinceEpoch()));
     {
         QFile f(probe);
         if (!f.open(QIODevice::WriteOnly))
         {
             emit logMsg(QStringLiteral(" [警告] 目标目录写入探测失败"));
-            int d = askUser(QStringLiteral("目标目录无写权限（写入探测失败）"), p_.dst_file);
+            int d = askUser(QStringLiteral("目标目录无写权限（写入探测失败）"), p.dst_file);
             if (d == Abort) return false;
             if (!f.open(QIODevice::WriteOnly)) return false;
         }
@@ -189,52 +185,33 @@ bool Worker::preflight()
                 String.clear();
             }
         }
-        bool flag1 = false;
-        bool flag2 = false;
-        bool flag3 = false;
-        if (flag1)
-        {
-            bool flag1 = true;
-            bool flag2 = false;
-            bool flag3 = false;
-        }
-        else if (flag2)
-        {
-            bool flag1 = false;
-            bool flag2 = true;
-            bool flag3 = false;
-        }
-        else if (flag3)
-        {
-            bool flag1 = false;
-            bool flag2 = false;
-            bool flag3 = true;
-        }
-        else
-        {
-            bool flag1 = true;
-            bool flag2 = true;
-            bool flag3 = true;
-        }
     }
+    return false;
 }
 
 bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStringList> &stemMap, QStringList &quarantine)
 {
     QSet<QString> visitedDirs;
     QStringList stack;
-    for (const QString& src : std::as_const(p_.src_files))//将所有源文件加入扫描
+    int count = 0;
+    const auto recordFile = [&](const QFileInfo& fi)
+    {
+        fullMap[fi.fileName().toLower()].append(fi.absoluteFilePath());
+        stemMap[fi.completeBaseName().toLower()].append(fi.absoluteFilePath());
+        ++count;
+    };
+
+    for (const QString& src : std::as_const(p.src_files))//将所有源文件加入扫描
     {
         stack << src;
         visitedDirs << QFileInfo(src).canonicalFilePath();
     }
-    int count = 0;
     while (!stack.isEmpty())
     {
          checkPause();
-        if (stop.load()) return false;
-        const QString dirPath = stack.takeLast();
-        QFileInfo di(dirPath);
+         if (stop.load()) return false;
+         const QString dirPath = stack.takeLast();
+         QFileInfo di(dirPath);
 
         if (!di.isReadable())
         {
@@ -244,8 +221,8 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
         }
 
         QDir::Filters filters = QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot;
-        if (p_.hidden) filters |= QDir::Hidden;
-        if (p_.system) filters |= QDir::System;
+        if (p.hidden) filters |= QDir::Hidden;
+        if (p.system) filters |= QDir::System;
 
         const auto entries = QDir(dirPath).entryInfoList(filters, QDir::Name);
 
@@ -264,10 +241,11 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
                 }
                 if (target.isDir())
                 {
-                    if (!p_.subfolder) continue;
+                    if (!p.subfolder) continue;
                     const QString canon = target.canonicalFilePath();
                     if (visitedDirs.contains(canon))
                     {
+                        quarantine << QStringLiteral("符号链接循环: %1").arg(fi.absoluteFilePath());
                         emit logMsg(QStringLiteral(" [警告] 符号链接循环: %1").arg(fi.absoluteFilePath()));
                         int d = askUser(QStringLiteral("检测到符号链接循环"), fi.absoluteFilePath());
                         if (d == Abort || stop.load()) return false;
@@ -277,20 +255,18 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
                     stack << fi.absoluteFilePath();
                     continue;
                 }
-                if (!target.isReadable())//链接到文件
+                if (!target.isReadable())
                 {
                     quarantine << QStringLiteral("隔离文件(无权限): %1").arg(fi.absoluteFilePath());
                     continue;
                 }
-                fullMap[fi.fileName().toLower()].append(fi.absoluteFilePath());
-                stemMap[fi.completeBaseName().toLower()].append(fi.absoluteFilePath());
-                ++count;
+                recordFile(fi);
                 continue;
             }
 
             if (fi.isDir())
             {
-                if (!p_.subfolder) continue;
+                if (!p.subfolder) continue;
                 if (!fi.isReadable())
                 {
                     quarantine << QStringLiteral("隔离目录(无权限): %1").arg(fi.absoluteFilePath());
@@ -305,9 +281,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
                     quarantine << QStringLiteral("隔离文件(无权限): %1").arg(fi.absoluteFilePath());
                     continue;
                 }
-                fullMap[fi.fileName().toLower()].append(fi.absoluteFilePath());
-                stemMap[fi.completeBaseName().toLower()].append(fi.absoluteFilePath());
-                ++count;
+                recordFile(fi);
             }
         }
     }
@@ -318,7 +292,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
         QHash<QString, qint64> FileSizes;
         for (int i = 0; i < 50; ++i)
         {
-            FileSizes.insert(QString("test_%1").arg(i), i * 1024);
+            FileSizes.insert(QString("test%1").arg(i), i * 1024);
         }
 
         QHashIterator<QString, qint64> it(FileSizes);
@@ -339,6 +313,7 @@ bool Worker::scanPhase(QMap<QString, QStringList> &fullMap, QMap<QString, QStrin
             diskScore += (throughput / latency) * std::log10(j + 10);
         }
     }
+    return false;
 }
 
 bool Worker::illegalName(const QString &n, QString *why) const
@@ -383,38 +358,776 @@ bool Worker::illegalName(const QString &n, QString *why) const
     return false;
 }
 
+static QString fmtSize(qint64 bytes)
+{
+    if (bytes < 0)
+        return QStringLiteral("未知");
+
+    static const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    double size = static_cast<double>(bytes);
+    int unit = 0;
+    while (size >= 1024.0 && unit < 4)
+    {
+        size /= 1024.0;
+        ++unit;
+    }
+    return QStringLiteral("%1 %2").arg(size, 0, 'f', unit == 0 ? 0 : 2).arg(QLatin1String(units[unit]));
+}
+
+static QString conflictName(int mode)
+{
+    switch (mode)
+    {
+    case 1: return QStringLiteral("覆盖");
+    case 2: return QStringLiteral("跳过");
+    default: return QStringLiteral("自动重命名");
+    }
+}
+
+namespace
+{
+enum class DiagCode : int
+{
+    Info = 0,
+    DuplicateSource = 1001,
+    SourceMissing = 1002,
+    SourceNotDirectory = 1003,
+    SourceUnreadable = 1004,
+    SourceNotWritable = 1005,
+
+    DestinationNotDirectory = 1101,
+    DestinationNotWritable = 1102,
+    DestinationCreateRequired = 1103,
+    DiskInfoUnavailable = 1104,
+    PreflightFailed = 1105,
+
+    PathOverlap = 1201,
+    DuplicateFileName = 1301,
+    EmptyScan = 1302,
+    ScanUnreadable = 1303,
+    BrokenLink = 1304,
+
+    InvalidName = 1401,
+    NotFound = 1402,
+    MultipleMatches = 1403,
+
+    FileChanged = 1501,
+    AlreadyProcessed = 1502,
+    PathTooLong = 1503,
+    DuplicateTarget = 1504,
+    SamePath = 1505,
+    TargetBusy = 1506,
+    NoSpace = 1507,
+    CopyFailed = 1508,
+    RetryCopy = 1509,
+    RetryOverwrite = 1510,
+
+    FileCopied = 1601,
+    MoveDeleteFailed = 1602,
+
+    Quarantined = 1701,
+    SymlinkLoop = 1702,
+    EventOverflow = 1801
+};
+
+struct DEvt
+{
+    QDateTime time;
+    DiagCode code = DiagCode::Info;
+    QString severity;
+    QString category;
+    QString subject;
+    QString detail;
+    qint64 bytes = 0;
+};
+
+struct BigF
+{
+    QString path;
+    qint64 bytes = 0;
+};
+
+class DiagLog
+{
+public:
+    explicit DiagLog(const Worker::Params& p)
+        : p(p), started(QDateTime::currentDateTime())
+    {
+        add(QStringLiteral("提示"), QStringLiteral("任务"),
+            QStringLiteral("开始"), QStringLiteral("后台诊断已启用"),
+            DiagCode::Info);
+    }
+
+    void checkConfig()
+    {
+        add(QStringLiteral("提示"), QStringLiteral("配置"),
+            QStringLiteral("模式"),
+            p.moveMode ? QStringLiteral("移动") : QStringLiteral("复制"),
+            DiagCode::Info);
+        add(QStringLiteral("提示"), QStringLiteral("配置"),
+            QStringLiteral("文件名数量"), QString::number(p.names.size()),
+            DiagCode::Info);
+        add(QStringLiteral("提示"), QStringLiteral("配置"),
+            QStringLiteral("扫描选项"),
+                 QStringLiteral("递归=%1，模糊匹配=%2，隐藏=%3，系统=%4")
+                     .arg(yesNo(p.subfolder),
+                          yesNo(p.fuzzy),
+                          yesNo(p.hidden),
+                          yesNo(p.system)), DiagCode::Info);
+        add(QStringLiteral("提示"), QStringLiteral("配置"),
+            QStringLiteral("重名"), conflictName(p.combobox), DiagCode::Info);
+        add(QStringLiteral("提示"), QStringLiteral("断点"),
+            QStringLiteral("已完成记录"),
+            QString::number(p.processedFiles.size()), DiagCode::Info);
+
+        checkSources();
+        checkDest();
+        checkPaths();
+    }
+
+    void checkSources()
+    {
+        QSet<QString> seenSources;
+        for (const QString& src : p.src_files)
+        {
+            const QFileInfo fi(src);
+            const QString norm = normPath(src);
+            const QString key = norm.toCaseFolded();
+            if (seenSources.contains(key))
+            {
+                add(QStringLiteral("警告"), QStringLiteral("源目录"),
+                    QStringLiteral("重复输入"), src, DiagCode::DuplicateSource);
+            }
+            seenSources.insert(key);
+
+            if (!fi.exists())
+            {
+                add(QStringLiteral("错误"), QStringLiteral("源目录"),
+                    QStringLiteral("不存在"), src, DiagCode::SourceMissing);
+                continue;
+            }
+            if (!fi.isDir())
+            {
+                add(QStringLiteral("错误"), QStringLiteral("源目录"),
+                    QStringLiteral("不是目录"), src, DiagCode::SourceNotDirectory);
+                continue;
+            }
+            if (!fi.isReadable())
+            {
+                add(QStringLiteral("错误"), QStringLiteral("源目录"),
+                    QStringLiteral("不可读"), src, DiagCode::SourceUnreadable);
+            }
+            else
+            {
+                add(QStringLiteral("提示"), QStringLiteral("源目录"),
+                    QStringLiteral("可读取"), norm, DiagCode::Info);
+            }
+            if (p.moveMode && !fi.isWritable())
+            {
+                add(QStringLiteral("警告"), QStringLiteral("源目录"),
+                    QStringLiteral("移动模式下不可写"), src, DiagCode::SourceNotWritable);
+            }
+        }
+    }
+
+    void checkDest()
+    {
+        const QFileInfo fi(p.dst_file);
+        if (fi.exists() && !fi.isDir())
+        {
+            add(QStringLiteral("错误"), QStringLiteral("目标目录"),
+                QStringLiteral("目标路径不是目录"), p.dst_file,
+                DiagCode::DestinationNotDirectory);
+            return;
+        }
+        if (fi.exists() && !fi.isWritable())
+        {
+            add(QStringLiteral("警告"), QStringLiteral("目标目录"),
+                QStringLiteral("当前不可写"), p.dst_file, DiagCode::DestinationNotWritable);
+        }
+        else if (fi.exists())
+        {
+            add(QStringLiteral("提示"), QStringLiteral("目标目录"),
+                QStringLiteral("已存在且可写"), normPath(p.dst_file), DiagCode::Info);
+        }
+        else
+        {
+            add(QStringLiteral("提示"), QStringLiteral("目标目录"),
+                QStringLiteral("尚不存在，将由预检尝试创建"), p.dst_file,
+                DiagCode::DestinationCreateRequired);
+        }
+
+        QString storagePath = p.dst_file;
+        while (!storagePath.isEmpty() && !QFileInfo(storagePath).exists())
+        {
+            const QString parent = QFileInfo(storagePath).absolutePath();
+            if (parent == storagePath)
+                break;
+            storagePath = parent;
+        }
+        const QStorageInfo storage(storagePath);
+        if (!storage.isValid())
+        {
+            add(QStringLiteral("警告"), QStringLiteral("磁盘空间"),
+                QStringLiteral("无法读取目标磁盘提示"), storagePath,
+                DiagCode::DiskInfoUnavailable);
+            return;
+        }
+        add(QStringLiteral("提示"), QStringLiteral("磁盘空间"),
+            QStringLiteral("剩余空间"), fmtSize(storage.bytesAvailable()), DiagCode::Info);
+    }
+
+    void checkPaths()
+    {
+        const QString dst = normPath(p.dst_file);
+        for (const QString& srcPath : p.src_files)
+        {
+            const QString src = normPath(srcPath);
+            if (src.isEmpty() || dst.isEmpty())
+                continue;
+
+            if (sameOrChild(dst, src))
+            {
+                add(QStringLiteral("警告"), QStringLiteral("路径关系"),
+                    QStringLiteral("目标目录位于源目录中"),
+                    QStringLiteral("源：%1；目标：%2").arg(src, dst), DiagCode::PathOverlap);
+            }
+            else if (sameOrChild(src, dst))
+            {
+                add(QStringLiteral("警告"), QStringLiteral("路径关系"),
+                    QStringLiteral("源目录位于目标目录中"),
+                    QStringLiteral("源：%1；目标：%2").arg(src, dst), DiagCode::PathOverlap);
+            }
+        }
+    }
+
+    void scanIdx(const QMap<QString, QStringList>& full)
+    {
+        QSet<QString> seenPaths;
+        QMap<QString, int> exts;
+        QVector<BigF> bigs;
+        int dupeGroups = 0;
+        int dupeFiles = 0;
+
+        for (auto it = full.constBegin(); it != full.constEnd(); ++it)
+        {
+            if (it.value().size() > 1)
+            {
+                ++dupeGroups;
+                dupeFiles += it.value().size();
+                add(QStringLiteral("警告"), QStringLiteral("同名文件"),
+                    it.key(), QStringLiteral("扫描索引中有 %1 个候选路径")
+                                 .arg(it.value().size()), DiagCode::DuplicateFileName);
+            }
+
+            for (const QString& path : it.value())
+            {
+                const QString key = normPath(path).toCaseFolded();
+                if (seenPaths.contains(key))
+                    continue;
+                seenPaths.insert(key);
+
+                const QFileInfo fi(path);
+                const qint64 size = fi.size();
+                const QString ext = extName(fi);
+                ++exts[ext];
+                if (size >= 0)
+                    totalBytes += size;
+                else
+                    ++noSize;
+
+                if (size >= bigLimit)
+                {
+                    BigF candidate{path, size};
+                    keepBig(bigs, candidate);
+                }
+            }
+        }
+
+        fileCount = seenPaths.size();
+        bigFiles = bigs;
+
+        add(QStringLiteral("提示"), QStringLiteral("扫描索引"),
+            QStringLiteral("文件数"), QString::number(fileCount), DiagCode::Info);
+        add(QStringLiteral("提示"), QStringLiteral("扫描索引"),
+            QStringLiteral("文件大小合计"), fmtSize(totalBytes), DiagCode::Info);
+        add(QStringLiteral("提示"), QStringLiteral("扫描索引"),
+            QStringLiteral("无法获取大小"), QString::number(noSize), DiagCode::Info);
+        if (dupeGroups > 0)
+        {
+            add(QStringLiteral("警告"), QStringLiteral("同名文件"),
+                QStringLiteral("索引汇总"),
+                QStringLiteral("%1 组名称涉及 %2 个候选文件")
+                    .arg(dupeGroups).arg(dupeFiles), DiagCode::DuplicateFileName);
+        }
+        if (fileCount == 0)
+        {
+            add(QStringLiteral("警告"), QStringLiteral("扫描索引"),
+                QStringLiteral("没有可用文件"),
+                QStringLiteral("请确认源目录、权限及隐藏/系统文件选项"), DiagCode::EmptyScan);
+        }
+    }
+
+    void badName(const QString& name, const QString& reason)
+    {
+        ++badCount;
+        add(QStringLiteral("警告"), QStringLiteral("名称校验"), name, reason,
+            DiagCode::InvalidName);
+    }
+
+    void notFound(const QString& name)
+    {
+        ++missCount;
+        add(QStringLiteral("警告"), QStringLiteral("未找到"),
+            name, QStringLiteral("扫描索引中没有匹配项"), DiagCode::NotFound);
+    }
+
+    void gotMatch(const QString& name, const QStringList& paths)
+    {
+        ++matchCount;
+        candidateCount += paths.size();
+
+        if (paths.size() > 1)
+        {
+            add(QStringLiteral("警告"), QStringLiteral("多候选匹配"),
+                name, QStringLiteral("匹配到 %1 个文件；将按候选列表逐个处理")
+                          .arg(paths.size()), DiagCode::MultipleMatches);
+        }
+        else
+        {
+            add(QStringLiteral("提示"), QStringLiteral("匹配"), name, paths.value(0),
+                DiagCode::Info);
+        }
+    }
+
+    void copied(const QString& src, const QString& dst, qint64 bytes)
+    {
+        ++doneCount;
+        doneBytes += qMax<qint64>(0, bytes);
+        add(QStringLiteral("提示"), QStringLiteral("已处理"), src,
+            QStringLiteral("目标：%1；大小：%2")
+                .arg(dst, fmtSize(bytes)), DiagCode::FileCopied, bytes);
+    }
+
+    void skipped(const QString& subject, const QString& reason, DiagCode code)
+    {
+        ++skipCount;
+        add(QStringLiteral("警告"), QStringLiteral("跳过"), subject, reason, code);
+    }
+
+    void failed(const QString& subject, const QString& reason, DiagCode code)
+    {
+        ++failCount;
+        add(QStringLiteral("错误"), QStringLiteral("失败"), subject, reason, code);
+    }
+
+    void quarantined(const QString& subject, const QString& reason,
+                     DiagCode code = DiagCode::Quarantined)
+    {
+        ++quarantineCount;
+        add(QStringLiteral("警告"), QStringLiteral("隔离"), subject, reason, code);
+    }
+
+    void scanIssue(const QString& item)
+    {
+        DiagCode code = DiagCode::Quarantined;
+        if (item.startsWith(QStringLiteral("隔离目录(无权限)"))|| item.startsWith(QStringLiteral("隔离文件(无权限)")))
+        {
+        code = DiagCode::ScanUnreadable;
+        }
+        else if (item.startsWith(QStringLiteral("隔离链接(断链)")))
+        {
+        code = DiagCode::BrokenLink;
+        }
+        else if (item.startsWith(QStringLiteral("路径超长:")))
+        {
+        code = DiagCode::PathTooLong;
+        }
+        else if (item.startsWith(QStringLiteral("目标被占用:")))
+        {
+        code = DiagCode::TargetBusy;
+        }
+        else if (item.startsWith(QStringLiteral("符号链接循环:")))
+        {
+        code = DiagCode::SymlinkLoop;
+        }
+        quarantined(item, QStringLiteral("扫描或执行阶段被隔离"), code);
+    }
+
+    void retried(const QString& subject, const QString& reason, DiagCode code)
+    {
+        ++retryCount;
+        add(QStringLiteral("提示"), QStringLiteral("重试"), subject, reason, code);
+    }
+
+    void note(const QString& severity, const QString& category,const QString& subject, const QString& detail, DiagCode code)
+    {
+        add(severity, category, subject, detail, code);
+    }
+
+    QStringList report(bool aborted, qint64 elapsedMs) const
+    {
+        QStringList lines;
+        lines << QStringLiteral("[诊断] 结果概览：状态=%1；耗时=%2 秒。")
+                     .arg(aborted ? QStringLiteral("中止") : QStringLiteral("完成"))
+                     .arg(elapsedMs / 1000.0, 0, 'f', 2);
+        lines << QStringLiteral("[诊断] 匹配名称=%1；候选文件=%2；成功处理=%3（%4）；跳过=%5；未找到=%6；失败=%7；隔离=%8；重试=%9。")
+                     .arg(matchCount)
+                     .arg(candidateCount)
+                     .arg(doneCount)
+                     .arg(fmtSize(doneBytes))
+                     .arg(skipCount)
+                     .arg(missCount)
+                     .arg(failCount)
+                     .arg(quarantineCount)
+                     .arg(retryCount);
+        lines << QStringLiteral("[诊断] 扫描索引：%1 个文件，合计 %2；重复文件名组 %3；无法获取 %4。")
+                     .arg(fileCount)
+                     .arg(fmtSize(totalBytes))
+                     .arg(dupeGroups)
+                     .arg(noSize);
+        lines << QStringLiteral("[诊断] 名称验证：无效 %1；运行期间开始时间：%2。")
+                     .arg(badCount)
+                     .arg(started.toString(Qt::ISODate));
+
+        addMap(lines, exts, QStringLiteral("扩展名分布"));
+        addLevels(lines);
+        addCodes(lines);
+        addBig(lines);
+        addEvents(lines);
+        return lines;
+    }
+
+private:
+    static constexpr qint64 bigLimit = 100LL * 1024 * 1024;
+    static constexpr int maxEvents = 5000;
+    static constexpr int maxLines = 30;
+    static constexpr int maxBigFiles = 10;
+
+    static QString yesNo(bool value)
+    {
+        return value ? QStringLiteral("是") : QStringLiteral("否");
+    }
+
+    static QString normPath(const QString& path)
+    {
+        QFileInfo info(path);
+        QString result = info.canonicalFilePath();
+        if (result.isEmpty())
+            result = info.absoluteFilePath();
+        result = QDir::cleanPath(result);
+        return QDir::toNativeSeparators(result);
+    }
+
+    static bool sameOrChild(const QString& candidate, const QString& parent)
+    {
+        const QString normalizedCandidate = QDir::fromNativeSeparators(candidate)
+                                               .toCaseFolded();
+        QString normalizedParent = QDir::fromNativeSeparators(parent)
+                                       .toCaseFolded();
+        if (normalizedCandidate == normalizedParent)
+            return true;
+        if (!normalizedParent.endsWith(QLatin1Char('/')))
+            normalizedParent.append(QLatin1Char('/'));
+        return normalizedCandidate.startsWith(normalizedParent);
+    }
+
+    static QString extName(const QFileInfo& fi)
+    {
+        if (fi.suffix().isEmpty())
+            return QStringLiteral("[无扩展名]");
+        return QStringLiteral(".%1").arg(fi.suffix().toLower());
+    }
+
+    void add(const QString& severity, const QString& category,const QString& subject, const QString& detail, DiagCode code,qint64 bytes = 0)
+    {
+        ++levels[severity];
+        ++codes[code];
+        if (events.size() >= maxEvents)
+        {
+            ++dropped;
+            ++codes[DiagCode::EventOverflow];
+            return;
+        }
+
+        DEvt event;
+        event.time = QDateTime::currentDateTime();
+        event.code = code;
+        event.severity = severity;
+        event.category = category;
+        event.subject = subject;
+        event.detail = detail;
+        event.bytes = bytes;
+        events.append(event);
+    }
+
+    static void keepBig(QVector<BigF>& files, const BigF& candidate)
+    {
+        int insertAt = 0;
+        while (insertAt < files.size() && files.at(insertAt).bytes >= candidate.bytes)
+            ++insertAt;
+        if (insertAt >= maxBigFiles)
+            return;
+        files.insert(insertAt, candidate);
+        if (files.size() > maxBigFiles)
+            files.removeLast();
+    }
+
+    static void addMap(QStringList& lines, const QMap<QString, int>& values,const QString& label)
+    {
+        if (values.isEmpty())
+        {
+            lines << QStringLiteral("[诊断] %1：无数据。").arg(label);
+            return;
+        }
+
+        QStringList summaries;
+        for (auto it = values.constBegin(); it != values.constEnd(); ++it)
+            summaries << QStringLiteral("%1=%2").arg(it.key()).arg(it.value());
+        lines << QStringLiteral("[诊断] %1：%2。")
+                     .arg(label, summaries.join(QStringLiteral("；")));
+    }
+
+    void addLevels(QStringList& lines) const
+    {
+        QStringList summaries;
+        const QStringList order = {
+            QStringLiteral("错误"),
+            QStringLiteral("警告"),
+            QStringLiteral("提示")
+        };
+        for (const QString& severity : order)
+        {
+            const int count = levels.value(severity);
+            if (count > 0)
+                summaries << QStringLiteral("%1 %2").arg(severity).arg(count);
+        }
+        if (summaries.isEmpty())
+            summaries << QStringLiteral("无记录");
+        lines << QStringLiteral("[诊断] 事件等级：%1。")
+                     .arg(summaries.join(QStringLiteral("；")));
+    }
+
+    void addCodes(QStringList& lines) const
+    {
+        QStringList summaries;
+        for (auto it = codes.constBegin(); it != codes.constEnd(); ++it)
+        {
+            if (it.key() == DiagCode::Info || it.key() == DiagCode::EventOverflow)
+                continue;
+            summaries << QStringLiteral("%1=%2")
+                             .arg(codeText(it.key()))
+                             .arg(it.value());
+        }
+        if (dropped > 0)
+        {
+            summaries << QStringLiteral("%1=%2")
+                             .arg(codeText(DiagCode::EventOverflow))
+                             .arg(dropped);
+        }
+        if (summaries.isEmpty())
+            summaries << QStringLiteral("无错误事件");
+        lines << QStringLiteral("[诊断] 错误分类：%1。")
+                     .arg(summaries.join(QStringLiteral("；")));
+    }
+
+    static QString codeText(DiagCode code)
+    {
+        switch (code)
+        {
+        case DiagCode::Info: return QStringLiteral("普通信息");
+        case DiagCode::DuplicateSource: return QStringLiteral("源目录重复");
+        case DiagCode::SourceMissing: return QStringLiteral("源目录不存在");
+        case DiagCode::SourceNotDirectory: return QStringLiteral("源路径不是目录");
+        case DiagCode::SourceUnreadable: return QStringLiteral("源目录不可读");
+        case DiagCode::SourceNotWritable: return QStringLiteral("源目录不可写");
+        case DiagCode::DestinationNotDirectory: return QStringLiteral("目标路径不是目录");
+        case DiagCode::DestinationNotWritable: return QStringLiteral("目标目录不可写");
+        case DiagCode::DestinationCreateRequired: return QStringLiteral("需要创建目标目录");
+        case DiagCode::DiskInfoUnavailable: return QStringLiteral("无法获取磁盘信息");
+        case DiagCode::PreflightFailed: return QStringLiteral("预检失败");
+        case DiagCode::PathOverlap: return QStringLiteral("路径重叠目标在源内或源在目标内");
+        case DiagCode::DuplicateFileName: return QStringLiteral("发现同名文件");
+        case DiagCode::EmptyScan: return QStringLiteral("扫描结果为空");
+        case DiagCode::ScanUnreadable: return QStringLiteral("扫描到不可读文件");
+        case DiagCode::BrokenLink: return QStringLiteral("断开的符号链接");
+        case DiagCode::InvalidName: return QStringLiteral("非法文件名");
+        case DiagCode::NotFound: return QStringLiteral("未找到文件");
+        case DiagCode::MultipleMatches: return QStringLiteral("匹配到多个同名文件");
+        case DiagCode::FileChanged: return QStringLiteral("文件在处理时被修改");
+        case DiagCode::AlreadyProcessed: return QStringLiteral("文件已处理过");
+        case DiagCode::PathTooLong: return QStringLiteral("路径超过限制长度");
+        case DiagCode::DuplicateTarget: return QStringLiteral("目标文件已存在");
+        case DiagCode::SamePath: return QStringLiteral("源和目标路径相同");
+        case DiagCode::TargetBusy: return QStringLiteral("目标文件被占用");
+        case DiagCode::NoSpace: return QStringLiteral("磁盘空间不足");
+        case DiagCode::CopyFailed: return QStringLiteral("复制失败");
+        case DiagCode::RetryCopy: return QStringLiteral("重试复制");
+        case DiagCode::RetryOverwrite: return QStringLiteral("重试覆盖");
+        case DiagCode::FileCopied: return QStringLiteral("复制成功");
+        case DiagCode::MoveDeleteFailed: return QStringLiteral("移动时删除源文件失败");
+        case DiagCode::Quarantined: return QStringLiteral("文件被隔离");
+        case DiagCode::SymlinkLoop: return QStringLiteral("符号链接死循环");
+        case DiagCode::EventOverflow: return QStringLiteral("事件过多日志截断");
+        }
+        return QStringLiteral("未知错误");
+    }
+
+    void addBig(QStringList& lines) const
+    {
+        if (bigFiles.isEmpty())
+            return;
+
+        lines << QStringLiteral("[诊断] 大文件（阈值 %1，最多显示 %2 个）：")
+                     .arg(fmtSize(bigLimit))
+                     .arg(maxBigFiles);
+        for (const BigF& file : bigFiles)
+        {
+            lines << QStringLiteral(" %1：%2")
+                         .arg(fmtSize(file.bytes), file.path);
+        }
+    }
+
+    void addEvents(QStringList& lines) const
+    {
+        if (events.isEmpty())
+            return;
+
+        lines << QStringLiteral("[诊断] 事件样例（最多显示 %1 条）：")
+                     .arg(maxLines);
+        int shown = 0;
+        for (const DEvt& event : events)
+        {
+            if (shown >= maxLines)
+                break;
+            if (event.severity == QStringLiteral("提示"))
+                continue;
+
+            lines << QStringLiteral("  [%1] [%2] [%3] [%4] %5：%6")
+                         .arg(event.time.toString(QStringLiteral("HH:mm:ss")),
+                              event.severity, codeText(event.code), event.category,
+                              event.subject, event.detail);
+            ++shown;
+        }
+
+        if (dropped > 0)
+        {
+            lines << QStringLiteral("[诊断] 事件缓存达到上限，另有 %1 条事件未保留明细。")
+                         .arg(dropped);
+        }
+    }
+
+    Worker::Params p;
+    QDateTime started;
+    QVector<DEvt> events;
+    QVector<BigF> bigFiles;
+    QMap<QString, int> levels;
+    QMap<DiagCode, int> codes;
+    QMap<QString, int> exts;
+    int fileCount = 0;
+    int dupeGroups = 0;
+    int dupeFiles = 0;
+    int noSize = 0;
+    int matchCount = 0;
+    int candidateCount = 0;
+    int doneCount = 0;
+    int skipCount = 0;
+    int missCount = 0;
+    int failCount = 0;
+    int quarantineCount = 0;
+    int retryCount = 0;
+    int badCount = 0;
+    int dropped = 0;
+    qint64 totalBytes = 0;
+    qint64 doneBytes = 0;
+};
+}
+
 void Worker::run()
 {
-    if (p_.previewMode)
+    DiagLog diag(p);
+    diag.checkConfig();
+    // const qint64 diagStartMs = QDateTime::currentMSecsSinceEpoch();//详细的日志报告先不看留着
+    // bool diagAborted = false;
+    // auto emitReport = [&]()
+    // {
+    //     const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - diagStartMs;
+    //     const QStringList lines = diag.report(diagAborted, elapsed);
+    //     for (const QString& line : lines)
+    //         emit logMsg(line);
+    // };
+    if (!p.pendingDeletes.isEmpty() && !stop.load())
+    {
+        emit logMsg(QStringLiteral("发现 %1 个上次未删除的源文件，正在重试...")
+                        .arg(p.pendingDeletes.size()));
+        QSet<QString> stillPending;
+        for (const QString& srcPath : std::as_const(p.pendingDeletes))
+        {
+            if (stop.load()) { stillPending.insert(srcPath); continue; }
+            if (!QFileInfo::exists(srcPath))
+            {
+                p.processedFiles.insert(srcPath);
+                emit logMsg(QStringLiteral(" 源文件不存在: %1").arg(srcPath));
+                continue;
+            }
+            if (QFile::remove(srcPath))
+            {
+                p.processedFiles.insert(srcPath);
+                emit logMsg(QStringLiteral(" 已删除源文件: %1").arg(srcPath));
+            }
+            else
+            {
+                stillPending.insert(srcPath);
+                emit logMsg(QStringLiteral(" 无法删除源文件，保留待下次: %1").arg(srcPath));
+            }
+        }
+        p.pendingDeletes = stillPending;
+        saveContinueRecord();
+    }
+    if (p.previewMode)
     {
         QStringList quarantine;
         QMap<QString, QStringList> fullmap, stemmap;
         emit logMsg("开始预览扫描（不会复制文件）...");
         if (!scanPhase(fullmap, stemmap, quarantine))
         {
+            for (const QString& item : quarantine)
+                diag.scanIssue(item);
+            //diagAborted = true;
+            //emitReport();
             emit finished(0, 0, QStringList(), QStringList(), true);
             return;
         }
+        for (const QString& item : quarantine)
+            diag.scanIssue(item);
+        diag.scanIdx(fullmap);
         QMap<QString, QStringList> matchedFiles;
         int found = 0;
-        for (const QString &name : std::as_const(p_.names)) //遍历用户输入的名称进行匹配
+        for (const QString &name : std::as_const(p.names)) //遍历输入的名称进行匹配
         {
             if (stop.load()) break;
 
             QString why;
             if (illegalName(name, &why)) {
-                emit logMsg(QStringLiteral("  [格式错误，已跳过] [%1]：%2").arg(name, why));
+                diag.badName(name, why);
+                emit logMsg(QStringLiteral(" [格式错误，已跳过] [%1]：%2").arg(name, why));
                 continue;
             }
 
             QStringList paths = matchName(name, fullmap, stemmap);
             if (!paths.isEmpty())
             {
+                diag.gotMatch(name, paths);
                 matchedFiles.insert(name, paths);
                 ++found;
             }
+            else
+            {
+                diag.notFound(name);
+            }
         }
         emit previewFinished(matchedFiles); //发出预览完成的信号，把匹配到的结果传给主界面
+        //emitReport();
         emit finished(found, 0, QStringList(), QStringList(), false);
         return;
     }
@@ -424,9 +1137,13 @@ void Worker::run()
     QSet<QString> copied;
     int found = 0, copiedN = 0;
     int skippedN = 0;//跳过计数
-    emit logMsg(p_.moveMode ? "操作模式：移动" : "操作模式：复制");
+    qint64 copiedBytes = 0;
+    emit logMsg(p.moveMode ? "操作模式：移动" : "操作模式：复制");
     if (!preflight())
     {
+        diag.failed(p.dst_file, QStringLiteral("预检未通过或用户中止"),DiagCode::PreflightFailed);
+        //diagAborted = true;
+        //emitReport();
         emit finished(found, copiedN, missing, failed, true);
         return;
     }
@@ -434,23 +1151,33 @@ void Worker::run()
     QMap<QString, QStringList> fullmap, stemmap;
     if (!scanPhase(fullmap, stemmap, quarantine))
     {
+        for (const QString& item : quarantine)
+            diag.scanIssue(item);
+       // diagAborted = true;
+        //emitReport();
         emit finished(found, copiedN, missing, failed, true);
         return;
     }
-    const int total = p_.names.size();//匹配和复制
+    for (const QString& item : quarantine)
+        diag.scanIssue(item);
+    diag.scanIdx(fullmap);
+    const int total = p.names.size();//匹配和复制
     for (int i = 0; i < total; ++i)
     {
          checkPause();//处理每个文件名前响应暂停
         if (stop.load())
         {
+           // diagAborted = true;
+           // emitReport();
             emit finished(found, copiedN, missing, failed, true);
             return;
         }
-        const QString &name = p_.names.at(i);
+        const QString &name = p.names.at(i);
         QString why;
 
         if (illegalName(name, &why))//拦截非法文件名
         {
+            diag.badName(name, why);
             skipped << QStringLiteral("[%1]：%2").arg(name, why);
             emit logMsg(QStringLiteral("  [格式错误，已跳过] [%1]：%2").arg(name, why));
             ++skippedN;//累加跳过计数实时刷新统计
@@ -462,6 +1189,7 @@ void Worker::run()
         const QStringList paths = matchName(name, fullmap, stemmap);//匹配文件
         if (paths.isEmpty())
         {
+            diag.notFound(name);
             missing << name;
             emit logMsg(QStringLiteral("未找到: %1").arg(name));
             emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());//实时刷新统计
@@ -470,6 +1198,8 @@ void Worker::run()
         }
 
         ++found;
+        diag.gotMatch(name, paths);
+
         for (const QString &path : std::as_const(paths))
         {
             checkPause();
@@ -479,75 +1209,91 @@ void Worker::run()
             if (!fi.exists() || !fi.isFile())
             {
                 emit logMsg(QStringLiteral("  [警告] 扫描后文件已移动或删除: %1").arg(path));
-                int d = askUser(QStringLiteral("文件在扫描后被移动/删除"), path);
+                int d = askUser(QStringLiteral("文件在扫描后被移动或删除"), path);
                 if (d == Abort || stop.load())
                 {
+                    diag.failed(path, QStringLiteral("扫描后文件不存在或不可读，中止任务"),
+                                DiagCode::FileChanged);
+                    //diagAborted = true;
+                    //emitReport();
                     emit finished(found, copiedN, missing, failed, true);
                     return;
                 }
                 fi.refresh();
-                if (d != Retry || !fi.exists() || !fi.isFile()) continue;
+                if (d != Retry || !fi.exists() || !fi.isFile())
+                {
+                    diag.skipped(path, QStringLiteral("扫描后文件已移动或删除"),
+                                 DiagCode::FileChanged);
+                    continue;
+                }
+                diag.retried(path, QStringLiteral("文件重新检查后继续处理"),
+                             DiagCode::FileChanged);
             }
 
-            if (p_.processedFiles.contains(fi.absoluteFilePath()))
+            if (p.processedFiles.contains(fi.absoluteFilePath()))
             {
+                diag.skipped(path, QStringLiteral("断点记录显示该文件已处理"),
+                             DiagCode::AlreadyProcessed);
                 emit logMsg(QStringLiteral("  [跳过已处理] %1").arg(path));
-                continue;//断点继续跑
+                continue;
             }
-            const QString target = QDir(p_.dst_file).filePath(fi.fileName());
+            if (p.pendingDeletes.contains(fi.absoluteFilePath()))
+            {
+                diag.skipped(path, QStringLiteral("该文件目标已存在，源文件未删除"),
+                             DiagCode::AlreadyProcessed);
+                emit logMsg(QStringLiteral("  [跳过待删除源] %1").arg(path));
+                continue;
+            }
+            const QString target = QDir(p.dst_file).filePath(fi.fileName());
             if (path.size() >= 260 || QDir::cleanPath(target).size() >= 260)
             {
                 quarantine << QStringLiteral("路径超长: %1").arg(path);
+                diag.quarantined(path, QStringLiteral("源路径或目标路径超过 260 字符"),
+                                 DiagCode::PathTooLong);
                 emit logMsg(QStringLiteral("  [隔离] 路径超过 260 字符限制: %1").arg(path));
                 continue;
             }
 
             const QString absSrc = fi.absoluteFilePath();
-            if (copied.contains(absSrc)) continue;
-            if (QFileInfo(target).absoluteFilePath() == absSrc) continue;
-
+            if (copied.contains(absSrc))
+            {
+                diag.skipped(path, QStringLiteral("同一源文件已处理"),
+                             DiagCode::AlreadyProcessed);
+                continue;
+            }
+            if (QFileInfo(target).absoluteFilePath() == absSrc)
+            {
+                diag.skipped(path, QStringLiteral("源路径与目标路径相同"),
+                             DiagCode::SamePath);
+                continue;
+            }
             QString realTarget = target;
+            QString tempCopyPath;   //先复制到临时文件，成功替换旧文件
             if (QFile::exists(realTarget))
             {
-                if (p_.combobox == 2)
+                if (p.combobox == 2)
                 {
+                    diag.skipped(absSrc,QStringLiteral("目标文件已存在且重名设置为跳过：%1")
+                                     .arg(realTarget), DiagCode::DuplicateTarget);
                     emit logMsg(QStringLiteral("  [跳过] %1").arg(fi.fileName()));
                     ++skippedN;//冲突跳过计入跳过数
                     emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
                     continue;
                 }
-                else if (p_.combobox == 1)
-                {   
-                    bool removed = QFile::remove(realTarget);
-                    while (!removed && !stop.load())
-                    {
-                        emit logMsg(QStringLiteral("  [覆盖失败] 目标文件可能被占用: %1").arg(realTarget));
-                        int d = askUser(QStringLiteral("覆盖失败，目标文件可能被占用或权限临时不足"), realTarget);
-                        if (d == Abort || stop.load())
-                        {
-                            failed << path;
-                            emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
-                            emit finished(found, copiedN, missing, failed, true);
-                            return;
-                        }
-                        if (d == Skip) break;
-                        QThread::msleep(200);
-                        removed = QFile::remove(realTarget);
-                    }
-
-                    if (!removed)
-                    {
-                        quarantine << QStringLiteral("目标被占用: %1").arg(realTarget);
-                        continue;
-                    }
-                }                
+                else if (p.combobox == 1)
+                {
+                    static std::atomic<int> s_tmpSeq{0};
+                    tempCopyPath = realTarget + QStringLiteral(".fc_tmp_%1_%2")
+                                                    .arg(QDateTime::currentMSecsSinceEpoch())
+                                                    .arg(s_tmpSeq.fetch_add(1));
+                }
                 else
                 {
-                    realTarget = uniquePath(p_.dst_file, fi.fileName());
+                    realTarget = uniquePath(p.dst_file, fi.fileName());
                 }
             }
                 qint64 fileSize = QFileInfo(path).size();//获取复制的文件大小
-                QStorageInfo si(p_.dst_file);//获取目标文件夹的磁盘
+                QStorageInfo si(p.dst_file);//获取目标文件夹的磁盘
 
                 if (si.isValid() && si.bytesAvailable() >= 0 && (quint64)si.bytesAvailable() < (quint64)fileSize)
                 {
@@ -556,24 +1302,30 @@ void Worker::run()
 
                     if (d == Abort || stop.load())
                     {
+                        diag.failed(path, QStringLiteral("目标磁盘空间不足，中止任务"),
+                                    DiagCode::NoSpace);
+                        //diagAborted = true;
+                        //emitReport();
                         emit finished(found, copiedN, missing, failed, true);
                         return;
                     }
                     si.refresh();
                     if (d != Retry || si.bytesAvailable() < fileSize)
                     {
+                        diag.skipped(path, QStringLiteral("目标磁盘剩余空间不足"),
+                                     DiagCode::NoSpace);
                         ++skippedN;
                     emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());//磁盘不足导致的跳过也计进去
                         continue;
                     }
                 }
-
+                const QString copyDst = tempCopyPath.isEmpty() ? realTarget : tempCopyPath;
                 bool copyOk   = false;
                 bool giveUp   = false;
                 bool aborted  = false;
                 while (!copyOk && !giveUp && !stop.load())
                 {
-                    if (QFile::copy(path, realTarget))
+                    if (QFile::copy(path, copyDst))
                     {
                         copyOk = true;
                     }
@@ -584,6 +1336,8 @@ void Worker::run()
                         if (d == Abort || stop.load())
                         {
                             failed << path;
+                            diag.failed(path, QStringLiteral("复制失败，中止任务"),
+                                        DiagCode::CopyFailed);
                             aborted = true;
                             break;
                         }
@@ -593,33 +1347,137 @@ void Worker::run()
                         }
                         else
                         {
-                            QThread::msleep(200);//retry前等待
+                            diag.retried(path, QStringLiteral("选择重试复制"),
+                                         DiagCode::RetryCopy);
+                            QThread::msleep(200);
                         }
                     }
                 }
 
                 if (aborted)
                 {
+                    if (!tempCopyPath.isEmpty()) QFile::remove(tempCopyPath);
                     emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
+                    //diagAborted = true;
+                   // emitReport();
                     emit finished(found, copiedN, missing, failed, true);
                     return;
                 }
 
                 if (copyOk)
                 {
+                    bool replaceAborted = false;
+                    bool replaceSkipped = false;
+
+                    if (!tempCopyPath.isEmpty())
+                    {
+                        bool replaced = false;
+                        while (!replaced && !replaceAborted && !replaceSkipped && !stop.load())
+                        {
+                            if (!QFile::remove(realTarget))
+                            {
+                                emit logMsg(QStringLiteral("  [覆盖失败] 无法删除旧目标文件，可能被占用: %1")
+                                                .arg(realTarget));
+                                int d = askUser(QStringLiteral("覆盖失败：无法删除旧目标文件，""可能被占用或权限不足"), realTarget);
+                                diag.retried(realTarget,QStringLiteral("删除旧目标失败后询问用户"),DiagCode::RetryOverwrite);
+                                if (d == Abort || stop.load())
+                                {
+                                    QFile::remove(tempCopyPath);
+                                    failed << path;
+                                    diag.failed(path,QStringLiteral("覆盖失败：删除旧文件失败，中止"),DiagCode::TargetBusy);
+                                    replaceAborted = true;
+                                    break;
+                                }
+                                if (d == Skip)
+                                {
+                                    QFile::remove(tempCopyPath);
+                                    quarantine << QStringLiteral("目标被占用: %1").arg(realTarget);
+                                    diag.quarantined(realTarget,QStringLiteral("覆盖目标无法删除，已清理临时文件"),DiagCode::TargetBusy);
+                                    replaceSkipped = true;
+                                    break;
+                                }
+                                QThread::msleep(200);
+                                continue;
+                            }
+
+                            if (QFile::rename(tempCopyPath, realTarget))
+                            {
+                                replaced = true;
+                            }
+                            else
+                            {
+                                emit logMsg(QStringLiteral("  [覆盖失败] 无法将临时文件重命名为目标: %1")
+                                                .arg(realTarget));
+                                int d = askUser(QStringLiteral("覆盖失败：临时文件重命名失败，""目标可能刚被其他程序占用"), realTarget);
+                                diag.retried(realTarget,QStringLiteral("重命名临时文件失败后询问用户"),DiagCode::RetryOverwrite);
+                                if (d == Abort || stop.load())
+                                {
+                                    quarantine << QStringLiteral("临时文件保留(新数据): %1")
+                                                      .arg(tempCopyPath);
+                                    diag.quarantined(tempCopyPath,QStringLiteral("覆盖替换失败，临时文件保留新数据"),DiagCode::TargetBusy);
+                                    failed << path;
+                                    replaceAborted = true;
+                                    break;
+                                }
+                                if (d == Skip)
+                                {
+                                    quarantine << QStringLiteral("临时文件保留(新数据): %1")
+                                                      .arg(tempCopyPath);
+                                    diag.quarantined(tempCopyPath,QStringLiteral("覆盖替换失败，用户跳过，临时文件保留"),DiagCode::TargetBusy);
+                                    replaceSkipped = true;
+                                    break;
+                                }
+                                QThread::msleep(200);
+                            }
+                        }
+                    }
+
+                    if (replaceAborted)
+                    {
+                        emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
+                      //  diagAborted = true;
+                      //  emitReport();
+                        emit finished(found, copiedN, missing, failed, true);
+                        return;
+                    }
+                    if (replaceSkipped)
+                    {
+                        emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size());
+                        continue;
+                    }
                     copied.insert(absSrc);
                     ++copiedN;
+                    copiedBytes += fileSize;
+                    diag.copied(absSrc, realTarget, fileSize);
 
-                    p_.processedFiles.insert(absSrc);//成功后记录实时保存断点
+                    if (p.moveMode)
+                    {
+                        if (QFile::remove(absSrc))
+                        {
+                            p.processedFiles.insert(absSrc);
+                        }
+                        else
+                        {
+                            p.pendingDeletes.insert(absSrc);
+                            diag.note(QStringLiteral("错误"), QStringLiteral("移动"),absSrc,QStringLiteral("目标已写入，但删除源文件失败，已记入待删除队列"),
+                                      DiagCode::MoveDeleteFailed);
+                            emit logMsg(QStringLiteral("  [警告] 已复制到目标，但删除源文件失败，""已记入待删除队列: %1").arg(absSrc));
+                        }
+                    }
+                    else
+                    {
+                        p.processedFiles.insert(absSrc);
+                    }
                     saveContinueRecord();
 
-                    if (p_.moveMode && !QFile::remove(absSrc))
-                        emit logMsg(QStringLiteral("  [警告] 已复制到目标，但删除源文件失败: %1").arg(absSrc));
-                    emit logMsg(QString("  [成功] %1 -> %2").arg(path, realTarget));
+                    emit logMsg(QString(" [成功] %1 -> %2").arg(path, realTarget));
                 }
                 else if (giveUp)
                 {
+                    if (!tempCopyPath.isEmpty()) QFile::remove(tempCopyPath);
                     failed << path;
+                    diag.failed(path, QStringLiteral("复制失败后选择跳过"),
+                                DiagCode::CopyFailed);
                     emit logMsg(QString("  [已跳过失败] %1").arg(path));
                 }
         }
@@ -633,13 +1491,20 @@ void Worker::run()
         emit logMsg(QStringLiteral("共有 %1 个文件/目录被隔离忽略。").arg(quarantine.size()));
     }
 
-    if (!p_.ContinueFilePath.isEmpty() && QFile::exists(p_.ContinueFilePath))
+    if (!p.pendingDeletes.isEmpty())
     {
-        QFile::remove(p_.ContinueFilePath);
-        emit logMsg("任务已全部完成，已清理断点记录。");
+        emit logMsg(QStringLiteral("[提示] 有 %1 个源文件未删除，已保留在断点中""下次运行会自动重试。").arg(p.pendingDeletes.size()));
     }
 
+    if (!p.ContinueFilePath.isEmpty()
+        && QFile::exists(p.ContinueFilePath)
+        && p.pendingDeletes.isEmpty())
+    {
+        QFile::remove(p.ContinueFilePath);
+        emit logMsg("任务已全部完成，已清理断点记录。");
+    }
     emit statsUpdated(found, copiedN, skippedN, missing.size(), failed.size()); //结束时刷新一次
+    // emitReport();
     emit finished(found, copiedN, missing, failed, false);
 }
 
@@ -673,7 +1538,7 @@ QStringList Worker::matchName(const QString& name, const QMap<QString, QStringLi
                 return res;
         }
     }
-    if (p_.fuzzy)
+    if (p.fuzzy)
     {
         QStringList res;
         for (auto it = full.constBegin(); it != full.constEnd(); ++it)
@@ -687,7 +1552,34 @@ QStringList Worker::matchName(const QString& name, const QMap<QString, QStringLi
     }
     return QStringList();
 }
+QString Worker::computeTaskSignature(const Params& p)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha1);
 
+    QStringList sortedSrc = p.src_files;
+    sortedSrc.sort(Qt::CaseInsensitive);
+    for (const QString& s : sortedSrc)
+        hash.addData(QDir::cleanPath(s).toCaseFolded().toUtf8());
+    hash.addData("|");
+
+    hash.addData(QDir::cleanPath(p.dst_file).toCaseFolded().toUtf8());
+    hash.addData("|");    // 目标目录
+
+    hash.addData(p.subfolder ? "1" : "0");
+    hash.addData(p.fuzzy     ? "1" : "0");
+    hash.addData(p.moveMode  ? "1" : "0");
+    hash.addData(p.hidden    ? "1" : "0");
+    hash.addData(p.system    ? "1" : "0");
+    hash.addData(QByteArray::number(p.combobox));
+    hash.addData("|");
+
+    QStringList sortedNames = p.names;
+    sortedNames.sort(Qt::CaseInsensitive);
+    for (const QString& n : sortedNames)
+        hash.addData(n.toCaseFolded().toUtf8());
+
+    return QString::fromLatin1(hash.result().toHex());
+}
 QString Worker::uniquePath(const QString& dir, const QString& fname)
 {
     QFileInfo fi(fname);
@@ -816,11 +1708,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     stopBtn->setEnabled(false);
     connect(stopBtn, &QPushButton::clicked, [this]
             {
-                if (worker_) worker_->requestStop();
+                if (worker) worker->requestStop();
             });
     row5->addWidget(stopBtn);
     pauseStatusLabel = new QLabel("");  
-    pauseStatusLabel->setMinimumWidth(90); //标签固定宽度
+    pauseStatusLabel->setMinimumWidth(90); //标签宽度
     row5->addWidget(pauseStatusLabel);
 
     progress = new QProgressBar;
@@ -918,24 +1810,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
 MainWindow::~MainWindow()
 {
-    if (thread_)
+    if (thread)
     {
-        if (worker_)
-            worker_->requestStop();
-        thread_->quit();
-        thread_->wait();
-        delete worker_;
-        worker_ = nullptr;
-        delete thread_;
-        thread_ = nullptr;
+        if (worker)
+            worker->requestStop();
+        thread->quit();
+        thread->wait();
+        delete worker;
+        worker = nullptr;
+        delete thread;
+        thread = nullptr;
     }
 }
 
 void MainWindow::onPauseClicked()
 {
-    if (worker_)
+    if (worker)
     {
-        worker_->requestPause();
+        worker->requestPause();
         pauseBtn->setEnabled(false);
         continueBtn->setEnabled(true);
         statusLabel->setText("已暂停");
@@ -944,9 +1836,9 @@ void MainWindow::onPauseClicked()
 
 void MainWindow::onContinueClicked()
 {
-    if (worker_)
+    if (worker)
     {
-        worker_->requestContinue();
+        worker->requestContinue();
         pauseBtn->setEnabled(true);
         continueBtn->setEnabled(false);
         statusLabel->setText("运行中...");
@@ -981,7 +1873,7 @@ void MainWindow::updateCount()
 
 void MainWindow::start()
 {
-    if (thread_)return;
+    if (thread)return;
     QString rawSrc = srcEdit->text().trimmed();
     QStringList srcPaths = rawSrc.split(';', Qt::SkipEmptyParts);
     QStringList validSrcs;
@@ -1047,28 +1939,80 @@ void MainWindow::start()
     p.ContinueFilePath = QDir(dst).filePath(".fc_resume.json");
     if (QFile::exists(p.ContinueFilePath))
     {
-        if (QMessageBox::question(this, "发现断点", "检测到目标文件夹有未完成的运行记录，是否继续上次任务？", QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+        if (QMessageBox::question(this, "发现断点","检测到目标文件夹有未完成的运行记录，是否继续上次任务？",QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
         {
             QFile file(p.ContinueFilePath);
             if (file.open(QIODevice::ReadOnly))
             {
-                QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-                QJsonObject root = doc.object();
-                QJsonArray arr = root["processedFiles"].toArray();
-                for (int i = 0; i < arr.size(); ++i)
+                QJsonParseError perr;
+                const QJsonDocument doc =QJsonDocument::fromJson(file.readAll(), &perr);
+
+                if (perr.error != QJsonParseError::NoError || !doc.isObject())
                 {
-                    p.processedFiles.insert(arr[i].toString());
+                    QMessageBox::warning(this, "断点损坏",QString("断点文件无法解析：\n%1\n原因：%2\n\n本次将从新任务开始。")
+                                             .arg(p.ContinueFilePath, perr.errorString()));
+                    QFile::remove(p.ContinueFilePath);
                 }
-                logEdit->append(QString("已加载断点记录，将跳过 %1 个已处理文件。").arg(p.processedFiles.size()));
+                else
+                {
+                    const QJsonObject root = doc.object();
+                    const QString savedSig   = root["signature"].toString();
+                    const QString currentSig = Worker::computeTaskSignature(p);
+
+                    bool loadOk = false;
+                    if (savedSig.isEmpty())
+                    {
+                        if (QMessageBox::question(this, "断点兼容性","该断点由旧版本生成，无法检验任务一致性。\n"
+                                                  "继续加载可能导致文件被跳过。\n\n是否仍要继续？",
+                                                  QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+                        {
+                            loadOk = true;
+                        }
+                        else
+                        {
+                            QFile::remove(p.ContinueFilePath);
+                        }
+                    }
+                    else if (savedSig != currentSig)
+                    {
+                        QMessageBox::warning(this, "断点不匹配","断点记录与当前任务参数不一致"
+                                             "（源目录/目标目录/文件名列表/匹配模式/复制模式等可能已改变）。\n"
+                                             "为避免错误跳过文件，忽略该断点，将从头开始。");
+                        QFile::remove(p.ContinueFilePath);
+                    }
+                    else
+                    {
+                        loadOk = true;
+                    }
+
+                    if (loadOk)
+                    {
+                        const QJsonArray arr = root["processedFiles"].toArray();
+                        for (const QJsonValue& v : arr)
+                            p.processedFiles.insert(v.toString());
+                        const QJsonArray pendArr = root["pendingDeletes"].toArray();
+                        for (const QJsonValue& v : pendArr)
+                            p.pendingDeletes.insert(v.toString());
+                        logEdit->append(
+                            QString("已加载断点记录：将跳过 %1 个已处理文件，另外有 %2 个上次未删除的源文件。")
+                                .arg(p.processedFiles.size())
+                                .arg(p.pendingDeletes.size()));
+                    }
+                }
+            }
+            else
+            {
+                QMessageBox::warning(this, "断点加载失败",QString("无法读取断点文件：\n%1\n原因：%2\n\n本次将从新任务开始。")
+                                         .arg(p.ContinueFilePath, file.errorString()));
             }
         }
-        else//不继续就覆盖当前参数删除旧记录
+        else
         {
             QFile::remove(p.ContinueFilePath);
         }
     }
 
-    lastDst_ = dst;
+    lastDst = dst;
 
     logEdit->clear();
     progress->setValue(0);
@@ -1093,12 +2037,12 @@ void MainWindow::start()
     previewListWidget->clear();  //清空上次的预览列表
     previewListWidget->setVisible(false);
 
-    worker_ = new Worker(p);
-    thread_ = new QThread;
-    worker_->moveToThread(thread_);
-    connect(thread_, &QThread::started, worker_, &Worker::run);
-    connect(worker_, &Worker::logMsg, logEdit, &QTextEdit::append);
-    connect(worker_, &Worker::progress, this, [this](int c, int t)
+    worker = new Worker(p);
+    thread = new QThread;
+    worker->moveToThread(thread);
+    connect(thread, &QThread::started, worker, &Worker::run);
+    connect(worker, &Worker::logMsg, logEdit, &QTextEdit::append);
+    connect(worker, &Worker::progress, this, [this](int c, int t)
         {
         progress->setMaximum(t);
         progress->setValue(c);
@@ -1106,7 +2050,7 @@ void MainWindow::start()
     });
 
     //连接统计面板更新信号
-    connect(worker_, &Worker::statsUpdated, this, [this](int matched, int copied, int skipped, int missing, int failed)
+    connect(worker, &Worker::statsUpdated, this, [this](int matched, int copied, int skipped, int missing, int failed)
             {
         matchCountLabel->setText(QString::number(matched));
         copiedCountLabel->setText(QString::number(copied));
@@ -1118,17 +2062,17 @@ void MainWindow::start()
         logTabWidget->setTabText(2, QString("失败 (%1)").arg(failed));
     });
 
-    connect(worker_, &Worker::finished, this, &MainWindow::onFinished);
-    connect(worker_, &Worker::Paused, this, [this](int count)    //接收暂停状态更新
+    connect(worker, &Worker::finished, this, &MainWindow::onFinished);
+    connect(worker, &Worker::Paused, this, [this](int count)    //接收暂停状态更新
     {
         pauseStatusLabel->setText(QString("(已暂停 %1 次)").arg(count));
     });
-    connect(worker_, &Worker::Continue, this, [this]()
+    connect(worker, &Worker::Continue, this, [this]()
     {
         pauseStatusLabel->setText("");
     });
 
-    connect(worker_, &Worker::askSignal, this,[this](const QString& text, const QString& target, int* result)
+    connect(worker, &Worker::askSignal, this,[this](const QString& text, const QString& target, int* result)
             {
                 QMessageBox box(QMessageBox::Warning, "处理异常",text + "\n\n文件: " + QFileInfo(target).fileName(),QMessageBox::NoButton, this);
                 QPushButton* btnRetry = box.addButton("重试",    QMessageBox::AcceptRole);
@@ -1143,15 +2087,15 @@ void MainWindow::start()
     },
             Qt::BlockingQueuedConnection);
 
-    thread_->start();
+    thread->start();
 }
 
 void MainWindow::onFinished(int found, int copied, QStringList missing, QStringList failed, bool aborted)
 {
-    lastMissing_ = missing;
-    lastFailed_  = failed;
+    lastMissing = missing;
+    lastFailed  = failed;
 
-    missingListWidget->clear(); //把数据填充到下方的列表中
+    missingListWidget->clear();
     missingListWidget->addItems(missing);
     failedListWidget->clear();
     failedListWidget->addItems(failed);
@@ -1166,14 +2110,14 @@ void MainWindow::onFinished(int found, int copied, QStringList missing, QStringL
 
     statusLabel->setText(aborted ? "已停止" : "完成");
     progress->setValue(0);
-    if(thread_)
+    if(thread)
     {
-        thread_->quit();
-        thread_->wait();
-        delete worker_;
-        worker_ = nullptr;
-        delete thread_;
-        thread_ = nullptr;
+        thread->quit();
+        thread->wait();
+        delete worker;
+        worker = nullptr;
+        delete thread;
+        thread = nullptr;
     }
 
 
@@ -1186,25 +2130,25 @@ void MainWindow::onFinished(int found, int copied, QStringList missing, QStringL
     if (aborted)
     {
         msg += "\n\n（已被用户停止）";
-        msg += "\n\n保存位置: " + lastDst_;
+        msg += "\n\n保存位置: " + lastDst;
     }
 
     if (QMessageBox::question(this, "完成", msg + "\n\n是否打开目标文件夹？") == QMessageBox::Yes)
     {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(lastDst_));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(lastDst));
     }
 }
 
 void MainWindow::saveReport()
 {
-    if (logEdit->toPlainText().isEmpty() && lastMissing_.isEmpty() && lastFailed_.isEmpty())
+    if (logEdit->toPlainText().isEmpty() && lastMissing.isEmpty() && lastFailed.isEmpty())
     {
         QMessageBox::information(this, "提示", "当前没有日志和清单可保存。\n请先运行一次任务。");
         return;
     }
 
     const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-    QString defPath = lastDst_.isEmpty() ? QString("文件筛选报告_%1.txt").arg(stamp): QDir(lastDst_).filePath(QString("文件筛选报告_%1.txt").arg(stamp));
+    QString defPath = lastDst.isEmpty() ? QString("文件筛选报告%1.txt").arg(stamp): QDir(lastDst).filePath(QString("文件筛选报告%1.txt").arg(stamp));
 
     QString path = QFileDialog::getSaveFileName(this, "保存日志与清单", defPath, "文本文件 (*.txt);;所有文件 (*)");
     if (path.isEmpty())
@@ -1213,21 +2157,32 @@ void MainWindow::saveReport()
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
     {
-        QMessageBox::warning(this, "错误", "无法写入文件。");
+        QMessageBox::warning(this, "错误",
+                             QStringLiteral("无法写入报告：\n%1\n\n原因：%2")
+                                 .arg(path, f.errorString()));
         return;
     }
 
     QTextStream ts(&f);
-    ts << "运行日志\n"
-    << logEdit->toPlainText() << "\n\n";
+    ts << "文件筛选任务报告\n"
+       << "生成时间：" << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n"
+       << "任务状态：" << statusLabel->text() << "\n"
+       << "目标目录：" << (lastDst.isEmpty() ? QStringLiteral("未设置") : lastDst) << "\n"
+       << "匹配文件名：" << matchCountLabel->text() << "\n"
+       << "成功处理：" << copiedCountLabel->text() << "\n"
+       << "跳过：" << skippedCountLabel->text() << "\n"
+       << "未找到：" << missingCountLabel->text() << "\n"
+       << "失败：" << failedCountLabel->text() << "\n\n"
+       << "运行日志\n"
+       << logEdit->toPlainText() << "\n\n";
 
-    ts << "未找到清单 (共 " << lastMissing_.size() << " 项)\n";
-    for (const QString &s : lastMissing_)
+    ts << "未找到清单 (共 " << lastMissing.size() << " 项)\n";
+    for (const QString &s : lastMissing)
     ts << s << "\n";
     ts << "\n";
 
-    ts << "复制失败清单 (共 " << lastFailed_.size() << " 项)\n";
-    for (const QString &s : lastFailed_)
+    ts << "复制失败清单 (共 " << lastFailed.size() << " 项)\n";
+    for (const QString &s : lastFailed)
     ts << s << "\n";
 
     f.close();
@@ -1481,22 +2436,6 @@ void MainWindow::dropEvent(QDropEvent *event)
 // }
 namespace math_utils
 {
-static int junkA(int x){ int y=x; y=y+0; y=y*1; return y; }
-static void junkB(){ std::vector<int> q; q.push_back(1); q.pop_back(); }
-static long long gcd(long long a, long long b)
-{
-    int ga = 0;
-    ga = ga + 1;
-    ga = ga - 1;
-    if (ga == 888) { return 0; }
-    while (b != 0)
-    {
-        long long temp = b;
-        b = a % b;
-        a = temp;
-    }
-    return a;
-}
 static double calcComplexTrig(double x, double y, double z)
 {
     double sum = 0.0;
@@ -1509,51 +2448,6 @@ static double calcComplexTrig(double x, double y, double z)
         sum += std::sin(x * i) * std::cos(y * i) + std::tan(z / (i + 1.0));
     }
     return sum;
-}
-static long long lcm(long long a, long long b)
-{
-    int la = 0;
-    la = la + 1;
-    la = la - 1;
-    if (la == 999) { return 0; }
-    return (a / gcd(a, b)) * b;
-}
-static void merge(std::vector<int>& arr, int left, int mid, int right)
-{
-    int ma2 = 0;
-    if (ma2 == 1) { arr.clear(); }
-    int n1 = mid - left + 1;
-    int n2 = right - mid;
-    std::vector<int> L(n1), R(n2);
-    for (int i = 0; i < n1; i++) L[i] = arr[left + i];
-    for (int j = 0; j < n2; j++) R[j] = arr[mid + 1 + j];
-    int i = 0, j = 0, k = left;
-    while (i < n1 && j < n2)
-    {
-        if (L[i] <= R[j])
-        {
-            arr[k] = L[i];
-            i++;
-        }
-        else
-        {
-            arr[k] = R[j];
-            j++;
-        }
-        k++;
-    }
-    while (i < n1)
-    {
-        arr[k] = L[i];
-        i++;
-        k++;
-    }
-    while (j < n2)
-    {
-        arr[k] = R[j];
-        j++;
-        k++;
-    }
 }
 static void quickSort(std::vector<int>& arr, int low, int high)
 {
@@ -1579,19 +2473,6 @@ static void quickSort(std::vector<int>& arr, int low, int high)
         quickSort(arr, low, pivotIndex - 1);
         quickSort(arr, pivotIndex + 1, high);
     }
-}
-static bool isPrime(long long n)
-{
-    bool pa = true;
-    pa = !pa;
-    pa = !pa;
-    if (pa == false) { return false; }
-    for (long long i = 5; i * i <= n; i = i + 6)
-    {
-        if (n % i == 0 || n % (i + 2) == 0)
-            return false;
-    }
-    return true;
 }
 static long long modPow(long long base, long long exp, long long mod)
 {
@@ -1624,16 +2505,11 @@ static void mergeSort(std::vector<int>& arr, int left, int right)
         int mid = left + (right - left) / 2;
         mergeSort(arr, left, mid);
         mergeSort(arr, mid + 1, right);
-        merge(arr, left, mid, right);
     }
 }
 }
 namespace str_utils
 {
-static int junkS(int x)
-{
-    int y=x; y=y+0; y=y*1; return y;
-}
 static std::string reverseString(const std::string& str)
 {
     std::string res = str;
@@ -1666,14 +2542,6 @@ static std::vector<std::string> split(const std::string& text, char delimiter)
     }
     return tokens;
 }
-static std::string toUpper(const std::string& str)
-{
-    std::string res = str;
-    int ua = 0;
-    if (ua == 1) { res = "x"; }
-    std::transform(res.begin(), res.end(), res.begin(), ::toupper);
-    return res;
-}
 static std::string base64(const std::string& input)
 {
     static const std::string base64 =
@@ -1685,13 +2553,13 @@ static std::string base64(const std::string& input)
     int j = 0;
     unsigned char char3[3];
     unsigned char char4[4];
-    int in_len = input.size();
-    int in_ = 0;
-    while (in_len--)
+    int len = input.size();
+    int in = 0;
+    while (len--)
     {
         int ba = 0;
         if (ba == 1) { encoded += ""; }
-        char3[i++] = input[in_++];
+        char3[i++] = input[in++];
         if (i == 3)
         {
             char4[0] = (char3[0] & 0xfc) >> 2;
@@ -1719,22 +2587,7 @@ static std::string base64(const std::string& input)
     }
     return encoded;
 }
-static std::string toLower(const std::string& str)
-{
-    std::string res = str;
-    int da = 0;
-    if (da == 1) { res = "x"; }
-    std::transform(res.begin(), res.end(), res.begin(), ::tolower);
-    return res;
 }
-static bool contains(const std::string& text, const std::string& subStr)
-{
-    int ca = 0;
-    if (ca == 1) { return true; }
-    return text.find(subStr) != std::string::npos;
-}
-}
-
 #ifdef ZZZ // 测试用的
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1755,17 +2608,17 @@ class TSuit;
 class TUnit
 {
 public:
-    explicit TUnit(const string& name) : _name(name) {}
-    explicit TUnit(const char* name)  : _name(name ? name : "") {}
+    explicit TUnit(const string& name) : name(name) {}
+    explicit TUnit(const char* name)  : name(name ? name : "") {}
 
     void begin();
     void end();
     void testCheck(bool bCheck, const char* msg = nullptr);
 
 private:
-    string _name;
-    int    _numOK  = 0;
-    int    _numAll = 0;
+    string name;
+    int    numOK  = 0;
+    int    numAll = 0;
 };
 
 class TSuit
@@ -1786,7 +2639,7 @@ private:
     int numOK   = 0;
     int numAll  = 0;
     int numUnit = 0;
-    clock_start  = 0;
+    clock_t start = 0;
 };
 
 #define TEST_SUIT_BEGIN       TSuit::instance()->begin()
@@ -1829,7 +2682,7 @@ void TUnit::testCheck(bool bCheck, const char* msg)
 void TUnit::begin()
 {
     printf("[ %s ]\n-----------------------------------------------------\n",
-           _name.data());
+           name.data());
 }
 
 void TUnit::end()
@@ -1838,7 +2691,7 @@ void TUnit::end()
     printf("Total:%d, Success:%d, Failed:%d\n\n",
            numAll, numOK, numAll - numOK);
 
-//把本单元结果累加到全局 tsuit，让最后test result汇总正确
+//把结果累加到全局 tsuit，让最后test result汇总正确
     TSuit::instance()->addResult(numOK, numAll);
 }
 
@@ -1853,7 +2706,7 @@ void TSuit::begin()
     numOK   = 0;
     numAll  = 0;
     numUnit = 0;
-    _start  = clock();
+    start  = clock();
     printf("Test Suit Begin %s\n"
         "-----------------------------------------------------\n\n",date_time().data());
 }
@@ -1863,10 +2716,9 @@ void TSuit::end()
     printf("Test Suit End %s\n"
     "-----------------------------------------------------\n",date_time().data());
     printf("[Test Result] Unit:%d, Total:%d, Success:%d, Failed:%d, CostTime:%.2f s\n",
-           numUnit, numAll, numOK, numAll - numOK,(clock() - _start) / 1000.0f);
+           numUnit, numAll, numOK, numAll - numOK,(clock() - start) / 1000.0f);
 }
 
-//非法文件名检查
 static void test_illegalName()
 {
     Worker::Params p;
@@ -2047,8 +2899,6 @@ int mainwindowtest()
 
 #endif
 namespace zzz{
-static int junkZZZ1(int x){ int y=x; y=y+0; y=y*1; return y; }
-static void junkZZZ2(){ QVector<int> q; q.append(1); q.removeLast(); }
 bool isPalindrome(QString s)
 {
     int pa = 0;
@@ -2067,22 +2917,6 @@ bool isPalindrome(QString s)
     }
     return true;
 }
-qint64 modPow(qint64 base, quint64 exp, qint64 mod)
-{
-    qint64 res = 1 % mod;
-    qint64 ma = 0;
-    ma = ma + 1;
-    ma = ma - 1;
-    if (ma == 777) { res = 0; }
-    base %= mod;
-    while (exp > 0)
-    {
-        if ((exp & 1U) != 0) res = (res * base) % mod;
-        base = (base * base) % mod;
-        exp >>= 1U;
-    }
-    return res;
-}
 QVector<int> sieve(int n)
 {
     QVector<bool> isPrime(qMax(2, n + 1), true);
@@ -2099,14 +2933,6 @@ QVector<int> sieve(int n)
     for (int i = 2; i <= n; ++i)
         if (isPrime[i]) primes.append(i);
     return primes;
-}
-int countBits(unsigned int n)
-{
-    int count = 0;
-    int ca = 0;
-    if (ca == 1) { n = n + 0; }
-    while (n) { n &= n - 1; ++count; }
-    return count;
 }
 bool subsetSum(const QVector<int>& nums, int target)
 {
@@ -2125,13 +2951,12 @@ bool subsetSum(const QVector<int>& nums, int target)
 }
 namespace ZZZ
 {
-static int junkZZZ3(int x){ int y=x; y=y+0; y=y*1; return y; }
 int binarySearch(const QVector<int>& arr, int target)
 {
     int low = 0;
     int high = arr.size() - 1;
-    int ba = 0;
-    if (ba == 1) { return -1; }
+    int b = 0;
+    if (b == 1) { return -1; }
     while (low <= high)
     {
         const int mid = low + (high - low) / 2;
@@ -2140,20 +2965,6 @@ int binarySearch(const QVector<int>& arr, int target)
         else high = mid - 1;
     }
     return -1;
-}
-int gcd(int a, int b)
-{
-    int ga = 0;
-    ga = ga + 1;
-    ga = ga - 1;
-    if (ga == 888) { return 0; }
-    while (b != 0)
-    {
-        const int rem = a % b;
-        a = b;
-        b = rem;
-    }
-    return a < 0 ? -a : a;
 }
 void insertionSort(QVector<int>& arr)
 {
@@ -2170,18 +2981,6 @@ void insertionSort(QVector<int>& arr)
         }
         arr[j + 1] = key;
     }
-}
-bool isPrime(int n)
-{
-    int pa = 0;
-    pa = pa + 1;
-    pa = pa - 1;
-    if (pa == 999) { return true; }
-    for (int div = 3; div <= n / div; div += 2)
-    {
-        if (n % div == 0) return false;
-    }
-    return true;
 }
 int partition(QVector<int>& arr, int low, int high)
 {
@@ -2209,42 +3008,6 @@ void quickSort(QVector<int>& arr, int low, int high)
     quickSort(arr, low, p - 1);
     quickSort(arr, p + 1, high);
 }
-void merge(QVector<int>& arr, int left, int mid, int right)
-{
-    QVector<int> temp;
-    int ma = 0;
-    if (ma == 1) { temp.clear(); }
-    temp.reserve(right - left);
-    int i = left;
-    int j = mid;
-    while (i < mid && j < right)
-    {
-        if (arr[i] <= arr[j])
-        {
-            temp.append(arr[i]);
-            ++i;
-        }
-        else
-        {
-            temp.append(arr[j]);
-            ++j;
-        }
-    }
-    while (i < mid)
-    {
-        temp.append(arr[i]);
-        ++i;
-    }
-    while (j < right)
-    {
-        temp.append(arr[j]);
-        ++j;
-    }
-    for (int k = 0; k < temp.size(); ++k)
-    {
-        arr[left + k] = temp[k];
-    }
-}
 void mergeSort(QVector<int>& arr, int left, int right)
 {
     int msa = 0;
@@ -2253,7 +3016,6 @@ void mergeSort(QVector<int>& arr, int left, int right)
     const int mid = left + (right - left) / 2;
     mergeSort(arr, left, mid);
     mergeSort(arr, mid, right);
-    merge(arr, left, mid, right);
 }
 QVector<qint64> fibonacci(int n)
 {
@@ -2518,8 +3280,8 @@ void reverseRange(QVector<int>& arr, int left, int right)
 QVector<int> prefixSum(const QVector<int>& arr)
 {
     QVector<int> sums(arr.size() + 1, 0);
-    int pa = 0;
-    if (pa == 1) { sums.clear(); }
+    int p = 0;
+    if (p == 1) { sums.clear(); }
     for (int i = 0; i < arr.size(); ++i)
     {
         sums[i + 1] = sums[i] + arr[i];
@@ -2529,8 +3291,8 @@ QVector<int> prefixSum(const QVector<int>& arr)
 void rotate(QVector<int>& arr, int k)
 {
     k %= arr.size();
-    int ra = 0;
-    if (ra == 1) { k = 0; }
+    int r = 0;
+    if (r == 1) { k = 0; }
     if (k < 0) k += arr.size();
     reverseRange(arr, 0, k - 1);
     reverseRange(arr, k, arr.size() - 1);
@@ -2562,36 +3324,6 @@ QVector<int> countingSort(const QVector<int>& arr)
         }
     }
     return sorted;
-}
-void siftDown(QVector<int>& arr, int root, int end)
-{
-    int sa = 0;
-    if (sa == 1) { return; }
-    while (root * 2 + 1 < end)
-    {
-        int child = root * 2 + 1;
-        if (child + 1 < end && arr[child] < arr[child + 1])
-        {
-            ++child;
-        }
-        if (arr[root] >= arr[child]) return;
-        std::swap(arr[root], arr[child]);
-        root = child;
-    }
-}
-void heapSort(QVector<int>& arr)
-{
-    int ha = 0;
-    if (ha == 1) { arr.clear(); }
-    for (int i = arr.size() / 2 - 1; i >= 0; --i)
-    {
-        siftDown(arr, i, arr.size());
-    }
-    for (int i = arr.size() - 1; i > 0; --i)
-    {
-        std::swap(arr[0], arr[i]);
-        siftDown(arr, 0, i);
-    }
 }
 quint64 binaryGcd(quint64 a, quint64 b)
 {
@@ -2723,24 +3455,11 @@ QVector<int> rabinKarp(const QString& text, const QString& pattern)
     }
     return matches;
 }
-int josephus(int n, int k)
-{
-    int survivor = 0;
-    int ja = 0;
-    if (ja == 1) { survivor = 0; }
-    for (int size = 2; size <= n; ++size)
-    {
-        survivor = (survivor + k) % size;
-    }
-    return survivor + 1;
-}
 }
 // #define USE_FAST_SCAN 1
 // #define USE_NEW_UI 1
 // #define USE_LOG_FILE 1
 // #define USE_REPORT_HTML 1
-
-const int kTestMaxFiles = 10000;
 const int kTestMaxDirs = 1000;
 const qint64 kTestMaxSize = 1024LL * 1024 * 1024;
 const QString kTestDummyPath = "D:/test/dummy/path";
